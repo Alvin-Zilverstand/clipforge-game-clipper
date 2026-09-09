@@ -5,6 +5,7 @@ use clipforge::capture::{
 use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
 use clipforge::game_watcher::running_processes;
+use clipforge::gsi_config::write_gsi_config_templates;
 use clipforge::integrations::{
     valve_gsi_raw_events, GameIntegration, IntegrationError, LeagueIntegration,
     LeagueLiveClientPoller, RawGameEvent, ValveGsiIntegration,
@@ -83,6 +84,12 @@ struct ClipDto {
     color_class: String,
 }
 
+#[derive(Debug, Serialize)]
+struct GsiConfigDto {
+    game_id: String,
+    path: String,
+}
+
 #[tauri::command]
 fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
@@ -136,6 +143,21 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn write_gsi_configs(runtime: State<'_, AppRuntime>) -> Result<Vec<GsiConfigDto>, String> {
+    write_gsi_config_templates(&runtime.library_root)
+        .map_err(|error| format!("Could not write GSI configs: {error}"))
+        .map(|configs| {
+            configs
+                .into_iter()
+                .map(|config| GsiConfigDto {
+                    game_id: config.game_id,
+                    path: config.path.display().to_string(),
+                })
+                .collect()
+        })
 }
 
 #[tauri::command]
@@ -664,6 +686,7 @@ fn main() {
             list_clips,
             set_replay_buffer,
             set_mic_enabled,
+            write_gsi_configs,
             poll_auto_clip_events,
             save_manual_clip,
             start_capture,

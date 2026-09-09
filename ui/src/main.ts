@@ -66,6 +66,11 @@ type ClipDto = {
   color_class: string;
 };
 
+type GsiConfigDto = {
+  game_id: string;
+  path: string;
+};
+
 type AppState = {
   activeView: "Library" | "Recording" | "Auto Clip" | "Uploads" | "Settings";
   recordingState: RecordingState;
@@ -82,6 +87,7 @@ type AppState = {
   uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
   customUploadEndpoint: string;
   customUploadResponsePath: string;
+  gsiConfigStatus: string;
   selectedClipId: string;
   clips: Clip[];
   autoEvents: AutoEvent[];
@@ -118,6 +124,7 @@ const state: AppState = {
   uploadProvider: "catbox",
   customUploadEndpoint: "",
   customUploadResponsePath: "url",
+  gsiConfigStatus: "",
   selectedClipId: "clip-1",
   clips: [
     {
@@ -403,6 +410,10 @@ function renderAutoClipView() {
           )
           .join("")}
       </div>
+      <div class="actions">
+        <button data-action="write-gsi-configs">Write GSI Configs</button>
+      </div>
+      ${state.gsiConfigStatus ? `<p class="muted file-path">${state.gsiConfigStatus}</p>` : ""}
     </section>
   `;
 }
@@ -491,6 +502,10 @@ function bindEvents() {
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='upload']")?.addEventListener("click", () => {
     void uploadSelectedClip();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='write-gsi-configs']")?.addEventListener("click", () => {
+    void writeGsiConfigs();
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='delete']")?.addEventListener("click", () => {
@@ -674,6 +689,21 @@ async function uploadSelectedClip() {
     render();
   } catch (error) {
     console.error("Could not queue upload", error);
+  }
+}
+
+async function writeGsiConfigs() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const configs = await tauriInvoke<GsiConfigDto[]>("write_gsi_configs");
+    state.gsiConfigStatus = configs.map((config) => `${config.game_id}: ${config.path}`).join(" · ");
+    render();
+  } catch (error) {
+    state.gsiConfigStatus = `Could not write GSI configs: ${String(error)}`;
+    render();
   }
 }
 
