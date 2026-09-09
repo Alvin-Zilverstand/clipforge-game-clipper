@@ -5,11 +5,14 @@ use clipforge::capture::{
 use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
 use clipforge::game_watcher::running_processes;
+use clipforge::integrations::{
+    GameIntegration, IntegrationError, LeagueIntegration, LeagueLiveClientPoller,
+};
 use clipforge::media::{
     collect_segments, concat_segments, generate_thumbnail, prune_old_segments, recent_segments,
     trim_clip as ffmpeg_trim_clip,
 };
-use clipforge::models::{Clip, ClipSource, RecordingStatus, UploadProvider};
+use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus, UploadProvider};
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::AppSettings;
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
@@ -26,6 +29,7 @@ struct AppRuntime {
     recorder: Mutex<RecorderService>,
     database: Mutex<ClipDatabase>,
     capture: Mutex<Option<ActiveCapture>>,
+    league_poller: Mutex<LeagueLiveClientPoller>,
 }
 
 #[derive(Debug)]
@@ -104,6 +108,51 @@ fn list_clips(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
 }
 
 #[tauri::command]
+fn poll_auto_clip_events(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
+    let (session_id, game_id, session_started_at) = {
+        let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+        let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+        let Some(active) = capture.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(session_id) = recorder.state.active_session_id.clone() else {
+            return Ok(Vec::new());
+        };
+        let Some(game_id) = recorder.state.detected_game_id.clone() else {
+            return Ok(Vec::new());
+        };
+        (session_id, game_id, active.started_at)
+    };
+
+    if game_id != "league-of-legends" {
+        return Ok(Vec::new());
+    }
+
+    let raw_events = {
+        let mut poller = runtime
+            .league_poller
+            .lock()
+            .map_err(|error| error.to_string())?;
+        match poller.poll_new_events(session_started_at) {
+            Ok(events) => events,
+            Err(IntegrationError::Http(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.to_string()),
+        }
+    };
+
+    let integration = LeagueIntegration;
+    let mut created = Vec::new();
+    for raw_event in raw_events {
+        if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
+            if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
+                created.push(clip);
+            }
+        }
+    }
+    Ok(created)
+}
+
+#[tauri::command]
 fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
     save_manual_clip_inner(seconds, runtime.inner())
 }
@@ -162,6 +211,57 @@ fn save_manual_clip_inner(seconds: u64, runtime: &AppRuntime) -> Result<ClipDto,
     persist_clip(runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
+}
+
+fn handle_auto_event_inner(
+    event: GameEvent,
+    runtime: &AppRuntime,
+) -> Result<Option<ClipDto>, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    let Some(active) = capture.as_ref() else {
+        return Ok(None);
+    };
+    let ffmpeg = find_ffmpeg_executable()
+        .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
+    let clip_window = recorder.settings.auto_clip.pre_roll + recorder.settings.auto_clip.post_roll;
+    let segment_paths = recent_segments(
+        &active.buffer_dir,
+        clip_window,
+        active.segment_duration,
+        SystemTime::now(),
+    )
+    .map_err(|error| error.to_string())?;
+    if segment_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let action = recorder.handle_game_event(event);
+    let RecorderAction::CreatedClip { clip_id, .. } = action else {
+        return Ok(None);
+    };
+    let clip = recorder
+        .library
+        .all()
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .cloned()
+        .ok_or_else(|| "Created auto clip was not found in the library.".to_string())?;
+
+    if let Err(error) = concat_segments(&ffmpeg, &segment_paths, &clip.path) {
+        recorder.library.remove_clip(&clip.id);
+        let _ = runtime
+            .database
+            .lock()
+            .map(|database| database.delete_clip(&clip.id));
+        return Err(error.to_string());
+    }
+    if let Some(thumbnail_path) = &clip.thumbnail_path {
+        let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
+    }
+    persist_clip(runtime, &clip)?;
+    save_manifest(&recorder)?;
+    Ok(Some(clip_to_dto(&clip)))
 }
 
 #[tauri::command]
@@ -418,6 +518,7 @@ fn main() {
             recorder: Mutex::new(recorder),
             database: Mutex::new(database),
             capture: Mutex::new(None),
+            league_poller: Mutex::new(LeagueLiveClientPoller::default()),
         })
         .setup(|app| {
             #[cfg(desktop)]
@@ -469,6 +570,7 @@ fn main() {
             get_status,
             refresh_detected_game,
             list_clips,
+            poll_auto_clip_events,
             save_manual_clip,
             start_capture,
             stop_capture,

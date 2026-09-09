@@ -669,6 +669,26 @@ async function refreshStatus() {
   }
 }
 
+async function pollAutoClips() {
+  if (!tauriInvoke || !state.captureActive) {
+    return;
+  }
+
+  try {
+    const clips = await tauriInvoke<ClipDto[]>("poll_auto_clip_events");
+    if (clips.length === 0) {
+      return;
+    }
+    const created = clips.map(clipFromDto);
+    state.clips = [...created, ...state.clips.filter((clip) => !created.some((fresh) => fresh.id === clip.id))];
+    state.selectedClipId = created[0].id;
+    state.activeView = "Library";
+    render();
+  } catch (error) {
+    console.warn("Could not poll auto clips", error);
+  }
+}
+
 function parseTimestamp(value: string) {
   const parts = value.trim().split(":").map(Number);
   if (parts.some((part) => Number.isNaN(part))) {
@@ -704,6 +724,9 @@ async function loadDesktopBridge() {
     window.setInterval(() => {
       void refreshStatus();
     }, 3_000);
+    window.setInterval(() => {
+      void pollAutoClips();
+    }, 2_000);
   } catch (error) {
     console.warn("Tauri bridge unavailable", error);
   }
