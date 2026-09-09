@@ -1,5 +1,6 @@
 use crate::models::UploadProvider;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UploadMetadata {
@@ -37,6 +38,17 @@ pub enum UploadError {
     Provider(String),
 }
 
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConfigured(message) => write!(f, "{message}"),
+            Self::FileTooLarge { max_mb } => write!(f, "file is larger than {max_mb} MB"),
+            Self::Network(message) => write!(f, "upload network error: {message}"),
+            Self::Provider(message) => write!(f, "upload provider error: {message}"),
+        }
+    }
+}
+
 pub trait Uploader {
     fn info(&self) -> UploaderInfo;
     fn upload(&self, file: &Path, metadata: &UploadMetadata) -> Result<UploadResult, UploadError>;
@@ -63,10 +75,31 @@ impl Uploader for CatboxUploader {
 
     fn upload(&self, file: &Path, _metadata: &UploadMetadata) -> Result<UploadResult, UploadError> {
         ensure_file_limit(file, 200)?;
-        Err(UploadError::Network(
-            "Catbox upload is wired at the adapter boundary; enable HTTP client dependency for live uploads."
-                .to_string(),
-        ))
+        let client = upload_client()?;
+        let file_part = reqwest::blocking::multipart::Part::file(file)
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let mut form = reqwest::blocking::multipart::Form::new()
+            .text("reqtype", "fileupload")
+            .part("fileToUpload", file_part);
+        if let Some(userhash) = &self.userhash {
+            if !userhash.trim().is_empty() {
+                form = form.text("userhash", userhash.clone());
+            }
+        }
+        let body = client
+            .post("https://catbox.moe/user/api.php")
+            .multipart(form)
+            .send()
+            .map_err(|error| UploadError::Network(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| UploadError::Provider(error.to_string()))?
+            .text()
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let url = parse_plain_url(&body)?;
+        Ok(UploadResult {
+            provider: UploadProvider::Catbox,
+            url,
+        })
     }
 }
 
@@ -98,10 +131,27 @@ impl Uploader for LitterboxUploader {
                 "Litterbox expiry must be one of 1, 12, 24, or 72 hours.".to_string(),
             ));
         }
-        Err(UploadError::Network(
-            "Litterbox upload is wired at the adapter boundary; enable HTTP client dependency for live uploads."
-                .to_string(),
-        ))
+        let client = upload_client()?;
+        let file_part = reqwest::blocking::multipart::Part::file(file)
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("reqtype", "fileupload")
+            .text("time", format!("{}h", self.expiry_hours))
+            .part("fileToUpload", file_part);
+        let body = client
+            .post("https://litterbox.catbox.moe/resources/internals/api.php")
+            .multipart(form)
+            .send()
+            .map_err(|error| UploadError::Network(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| UploadError::Provider(error.to_string()))?
+            .text()
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let url = parse_plain_url(&body)?;
+        Ok(UploadResult {
+            provider: UploadProvider::Litterbox,
+            url,
+        })
     }
 }
 
@@ -111,6 +161,7 @@ pub struct CustomHttpUploader {
     pub method: String,
     pub multipart_field: String,
     pub response_url_path: String,
+    pub headers: Vec<(String, String)>,
 }
 
 impl Uploader for CustomHttpUploader {
@@ -127,20 +178,52 @@ impl Uploader for CustomHttpUploader {
         }
     }
 
-    fn upload(
-        &self,
-        _file: &Path,
-        _metadata: &UploadMetadata,
-    ) -> Result<UploadResult, UploadError> {
+    fn upload(&self, file: &Path, metadata: &UploadMetadata) -> Result<UploadResult, UploadError> {
         if self.endpoint.trim().is_empty() {
             return Err(UploadError::NotConfigured(
                 "custom upload endpoint is required".to_string(),
             ));
         }
-        Err(UploadError::Network(
-            "Custom upload is configured; enable HTTP client dependency for live uploads."
-                .to_string(),
-        ))
+        if !self.method.eq_ignore_ascii_case("POST") {
+            return Err(UploadError::Provider(
+                "custom uploads currently support POST multipart requests".to_string(),
+            ));
+        }
+        let client = upload_client()?;
+        let file_part = reqwest::blocking::multipart::Part::file(file)
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let field_name = if self.multipart_field.trim().is_empty() {
+            "file"
+        } else {
+            self.multipart_field.trim()
+        };
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("clip_id", metadata.clip_id.clone())
+            .text("game_id", metadata.game_id.clone())
+            .text("title", metadata.title.clone())
+            .part(field_name.to_string(), file_part);
+        let mut request = client.post(&self.endpoint).multipart(form);
+        for (name, value) in &self.headers {
+            if !name.trim().is_empty() {
+                request = request.header(name, value);
+            }
+        }
+        let body = request
+            .send()
+            .map_err(|error| UploadError::Network(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| UploadError::Provider(error.to_string()))?
+            .text()
+            .map_err(|error| UploadError::Network(error.to_string()))?;
+        let url = if self.response_url_path.trim().is_empty() {
+            parse_plain_url(&body)?
+        } else {
+            extract_json_path(&body, &self.response_url_path)?
+        };
+        Ok(UploadResult {
+            provider: UploadProvider::CustomHttp,
+            url,
+        })
     }
 }
 
@@ -178,6 +261,42 @@ fn ensure_file_limit(file: &Path, max_mb: u64) -> Result<(), UploadError> {
     Ok(())
 }
 
+fn upload_client() -> Result<reqwest::blocking::Client, UploadError> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent("ClipForge/0.1")
+        .build()
+        .map_err(|error| UploadError::Network(error.to_string()))
+}
+
+fn parse_plain_url(body: &str) -> Result<String, UploadError> {
+    let trimmed = body.trim();
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Ok(trimmed.to_string())
+    } else {
+        Err(UploadError::Provider(trimmed.to_string()))
+    }
+}
+
+fn extract_json_path(body: &str, path: &str) -> Result<String, UploadError> {
+    let mut value: &serde_json::Value = &serde_json::from_str(body)
+        .map_err(|error| UploadError::Provider(format!("invalid JSON response: {error}")))?;
+    for key in path.trim().trim_start_matches("$.").split('.') {
+        if key.is_empty() {
+            continue;
+        }
+        value = value.get(key).ok_or_else(|| {
+            UploadError::Provider(format!("response URL path was not found: {path}"))
+        })?;
+    }
+    let Some(url) = value.as_str() else {
+        return Err(UploadError::Provider(format!(
+            "response URL path is not a string: {path}"
+        )));
+    };
+    parse_plain_url(url)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +314,15 @@ mod tests {
         );
 
         assert!(matches!(result, Err(UploadError::Provider(_))));
+    }
+
+    #[test]
+    fn extracts_custom_json_url_path() {
+        let url = extract_json_path(
+            r#"{"data":{"url":"https://example.test/c.mp4"}}"#,
+            "data.url",
+        )
+        .expect("url");
+        assert_eq!(url, "https://example.test/c.mp4");
     }
 }

@@ -1,12 +1,17 @@
 use clipforge::capture::{
     ffmpeg_is_available, find_ffmpeg_executable, CaptureBackend, CaptureConfig, CaptureSource,
-    EncoderPreference, FfmpegCaptureBackend,
+    EncoderPreference, FfmpegReplayCaptureBackend,
 };
-use clipforge::game_detection::{default_profiles, detect_game, RunningProcess};
+use clipforge::database::ClipDatabase;
+use clipforge::game_detection::{default_profiles, detect_game};
+use clipforge::media::{
+    collect_segments, concat_segments, generate_thumbnail, prune_old_segments, recent_segments,
+    trim_clip as ffmpeg_trim_clip,
+};
 use clipforge::models::{Clip, ClipSource, RecordingStatus, UploadProvider};
-use clipforge::recorder::{BufferSegment, RecorderAction, RecorderService};
+use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::AppSettings;
-use clipforge::storage::{clip_path, is_inside_root, write_placeholder_mp4, LibraryPaths};
+use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
 use serde::Serialize;
 use std::env;
 use std::fs;
@@ -18,14 +23,17 @@ use tauri::State;
 
 struct AppRuntime {
     recorder: Mutex<RecorderService>,
+    database: Mutex<ClipDatabase>,
     capture: Mutex<Option<ActiveCapture>>,
 }
 
 #[derive(Debug)]
 struct ActiveCapture {
-    output_path: PathBuf,
+    buffer_dir: PathBuf,
+    session_output_path: PathBuf,
+    segment_duration: Duration,
     started_at: SystemTime,
-    backend: FfmpegCaptureBackend,
+    backend: FfmpegReplayCaptureBackend,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +63,7 @@ struct ClipDto {
     created_at: String,
     upload_state: String,
     path: String,
+    thumbnail_path: Option<String>,
     tags: Vec<String>,
     color_class: String,
 }
@@ -75,7 +84,24 @@ fn list_clips(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
 #[tauri::command]
 fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    let Some(active) = capture.as_ref() else {
+        return Err("Start recording before saving a replay clip.".to_string());
+    };
+    let ffmpeg = find_ffmpeg_executable()
+        .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
     let now = SystemTime::now();
+    let segment_paths = recent_segments(
+        &active.buffer_dir,
+        Duration::from_secs(seconds),
+        active.segment_duration,
+        now,
+    )
+    .map_err(|error| error.to_string())?;
+    if segment_paths.is_empty() {
+        return Err("The replay buffer has not produced any segments yet.".to_string());
+    }
+
     let action = recorder
         .save_manual_clip(Duration::from_secs(seconds), now)
         .ok_or_else(|| "No active recording session is available.".to_string())?;
@@ -92,7 +118,22 @@ fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<Clip
         .cloned()
         .ok_or_else(|| "Created clip was not found in the library.".to_string())?;
 
-    write_placeholder_mp4(&clip.path, &clip.id).map_err(|error| error.to_string())?;
+    if let Err(error) = concat_segments(&ffmpeg, &segment_paths, &clip.path) {
+        recorder.library.remove_clip(&clip.id);
+        if let Ok(database) = runtime.database.lock() {
+            let _ = database.delete_clip(&clip.id);
+        }
+        return Err(error.to_string());
+    }
+    if let Some(thumbnail_path) = &clip.thumbnail_path {
+        let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
+    }
+    let _ = prune_old_segments(
+        &active.buffer_dir,
+        recorder.settings.replay_buffer,
+        active.segment_duration,
+    );
+    persist_clip(&runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
 }
@@ -119,9 +160,13 @@ fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String
         .active_session_id
         .clone()
         .ok_or_else(|| "Recorder session did not start.".to_string())?;
-    let output_dir = recorder.paths.sessions_root.join(&session_id);
-    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    let output_path = output_dir.join(format!("session-{}.mp4", unix_millis(now)));
+    let session_dir = recorder.paths.sessions_root.join(&session_id);
+    let buffer_dir = recorder.paths.buffer_root.join(&session_id);
+    fs::create_dir_all(&session_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&buffer_dir).map_err(|error| error.to_string())?;
+    let session_output_path = session_dir.join(format!("session-{}.mp4", unix_millis(now)));
+    let segment_duration = Duration::from_secs(5);
+    let segment_pattern = buffer_dir.join("segment-%05d.mp4");
 
     let config = CaptureConfig {
         source: CaptureSource::Desktop,
@@ -130,12 +175,17 @@ fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String
         fps: recorder.settings.quality.fps,
         bitrate_kbps: recorder.settings.quality.bitrate_kbps,
         encoder: EncoderPreference::HardwareH264,
+        system_audio_enabled: true,
         mic_enabled: recorder.settings.privacy.mic_enabled,
+        system_audio_device: None,
+        mic_device: None,
     };
-    let mut backend = FfmpegCaptureBackend::new(ffmpeg, &output_path);
+    let mut backend = FfmpegReplayCaptureBackend::new(ffmpeg, &segment_pattern, segment_duration);
     backend.start(config).map_err(|error| error.to_string())?;
     *capture = Some(ActiveCapture {
-        output_path,
+        buffer_dir,
+        session_output_path,
+        segment_duration,
         started_at: now,
         backend,
     });
@@ -150,7 +200,30 @@ fn stop_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String>
 
     if let Some(mut active) = capture.take() {
         active.backend.stop().map_err(|error| error.to_string())?;
-        add_session_clip(&mut recorder, active.output_path, active.started_at, SystemTime::now())?;
+        let ffmpeg = find_ffmpeg_executable()
+            .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
+        let segments = collect_segments(&active.buffer_dir)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|segment| segment.path)
+            .collect::<Vec<_>>();
+        if !segments.is_empty() {
+            concat_segments(&ffmpeg, &segments, &active.session_output_path)
+                .map_err(|error| error.to_string())?;
+            let clip = add_session_clip(
+                &mut recorder,
+                active.session_output_path,
+                active.started_at,
+                SystemTime::now(),
+            )?;
+            if let Some(thumbnail_path) = &clip.thumbnail_path {
+                let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
+            }
+            persist_clip(&runtime, &clip)?;
+        }
+        if is_inside_root(&recorder.paths.buffer_root, &active.buffer_dir) {
+            let _ = fs::remove_dir_all(&active.buffer_dir);
+        }
     }
 
     if matches!(recorder.state.status, RecordingStatus::RecordingSession) {
@@ -172,7 +245,13 @@ fn delete_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<Vec<Cl
     if can_delete_file && clip.path.exists() {
         fs::remove_file(&clip.path).map_err(|error| error.to_string())?;
     }
+    if let Some(thumbnail_path) = &clip.thumbnail_path {
+        if is_inside_root(&recorder.paths.thumbs_root, thumbnail_path) && thumbnail_path.exists() {
+            fs::remove_file(thumbnail_path).map_err(|error| error.to_string())?;
+        }
+    }
 
+    delete_clip_record(&runtime, &clip_id)?;
     save_manifest(&recorder)?;
     Ok(recorder.library.all().iter().map(clip_to_dto).collect())
 }
@@ -234,27 +313,14 @@ fn trim_clip(
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
-    let status = Command::new(ffmpeg)
-        .args([
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            &format!("{start_seconds:.3}"),
-            "-to",
-            &format!("{end_seconds:.3}"),
-            "-i",
-            &source_clip.path.display().to_string(),
-            "-c",
-            "copy",
-            &output_path.display().to_string(),
-        ])
-        .status()
-        .map_err(|error| error.to_string())?;
-    if !status.success() {
-        return Err("FFmpeg could not trim this clip.".to_string());
-    }
+    ffmpeg_trim_clip(
+        &ffmpeg,
+        &source_clip.path,
+        &output_path,
+        start_seconds,
+        end_seconds,
+    )
+    .map_err(|error| error.to_string())?;
 
     let clip = Clip {
         id: trimmed_id,
@@ -279,7 +345,11 @@ fn trim_clip(
         upload_url: None,
         upload_provider: None,
     };
+    if let Some(thumbnail_path) = &clip.thumbnail_path {
+        let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
+    }
     recorder.library.add_clip(clip.clone());
+    persist_clip(&runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
 }
@@ -294,22 +364,25 @@ fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDt
     {
         return Err(format!("Clip {clip_id} was not found."));
     }
-    save_manifest(&recorder)?;
-    recorder
+    let clip = recorder
         .library
         .all()
         .iter()
         .find(|clip| clip.id == clip_id)
-        .map(clip_to_dto)
-        .ok_or_else(|| format!("Clip {clip_id} was not found."))
+        .cloned()
+        .ok_or_else(|| format!("Clip {clip_id} was not found."))?;
+    persist_clip(&runtime, &clip)?;
+    save_manifest(&recorder)?;
+    Ok(clip_to_dto(&clip))
 }
 
 fn main() {
-    let recorder = create_boot_recorder();
+    let (recorder, database) = create_runtime().expect("could not initialize ClipForge runtime");
 
     tauri::Builder::default()
         .manage(AppRuntime {
             recorder: Mutex::new(recorder),
+            database: Mutex::new(database),
             capture: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
@@ -327,36 +400,25 @@ fn main() {
         .expect("error while running ClipForge desktop shell");
 }
 
-fn create_boot_recorder() -> RecorderService {
+fn create_runtime() -> Result<(RecorderService, ClipDatabase), String> {
     let root = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("clipforge-library");
     let settings = AppSettings::default_for_root(&root);
     let paths = LibraryPaths::new(&root);
-    let _ = paths.ensure();
+    paths.ensure().map_err(|error| error.to_string())?;
+    let database = ClipDatabase::open(root.join("library.sqlite"))
+        .map_err(|error| format!("Could not open clip database: {error}"))?;
     let mut recorder = RecorderService::new(settings, paths);
-
-    let sample_processes = vec![RunningProcess {
-        pid: 730,
-        process_name: "cs2.exe".to_string(),
-        executable_path: "C:/Steam/cs2.exe".to_string(),
-        window_title: Some("Counter-Strike 2".to_string()),
-    }];
-
-    if let Some(game) = detect_game(&sample_processes, &default_profiles()) {
-        let now = SystemTime::now();
-        recorder.start_for_game(game.game_id, now);
-        for index in 0..12 {
-            recorder.add_segment(BufferSegment {
-                id: format!("boot-segment-{index}"),
-                started_at: now + Duration::from_secs(index * 5),
-                duration: Duration::from_secs(5),
-                path_hint: format!("boot_segment_{index}.mp4"),
-            });
-        }
+    for clip in database
+        .load_clips()
+        .map_err(|error| format!("Could not load clip database: {error}"))?
+    {
+        recorder.library.add_clip(clip);
     }
 
-    recorder
+    let _ = detect_game(&[], &default_profiles());
+    Ok((recorder, database))
 }
 
 fn add_session_clip(
@@ -364,9 +426,12 @@ fn add_session_clip(
     output_path: PathBuf,
     started_at: SystemTime,
     stopped_at: SystemTime,
-) -> Result<(), String> {
+) -> Result<Clip, String> {
     if !output_path.exists() {
-        return Ok(());
+        return Err(format!(
+            "Session recording was not written: {}",
+            output_path.display()
+        ));
     }
 
     let duration = stopped_at
@@ -398,8 +463,9 @@ fn add_session_clip(
         upload_url: None,
         upload_provider: None,
     };
-    recorder.library.add_clip(clip);
-    save_manifest(recorder)
+    recorder.library.add_clip(clip.clone());
+    save_manifest(recorder)?;
+    Ok(clip)
 }
 
 fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
@@ -411,7 +477,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         upload_enabled: false,
         session_recording: matches!(recorder.state.status, RecordingStatus::RecordingSession),
         capture_active: capture.is_some(),
-        capture_path: capture.map(|active| active.output_path.display().to_string()),
+        capture_path: capture.map(|active| active.session_output_path.display().to_string()),
         clip_count: recorder.library.all().len(),
         library_root: recorder.paths.clip_root.display().to_string(),
         ffmpeg_available: ffmpeg_is_available(),
@@ -455,6 +521,10 @@ fn clip_to_dto(clip: &Clip) -> ClipDto {
             "Local only".to_string()
         },
         path: clip.path.display().to_string(),
+        thumbnail_path: clip
+            .thumbnail_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
         tags: clip.tags.clone(),
         color_class: match clip.source {
             ClipSource::ManualHotkey => "manual".to_string(),
@@ -463,6 +533,20 @@ fn clip_to_dto(clip: &Clip) -> ClipDto {
             ClipSource::Imported => "manual".to_string(),
         },
     }
+}
+
+fn persist_clip(runtime: &State<'_, AppRuntime>, clip: &Clip) -> Result<(), String> {
+    let database = runtime.database.lock().map_err(|error| error.to_string())?;
+    database
+        .upsert_clip(clip)
+        .map_err(|error| format!("Could not save clip database record: {error}"))
+}
+
+fn delete_clip_record(runtime: &State<'_, AppRuntime>, clip_id: &str) -> Result<(), String> {
+    let database = runtime.database.lock().map_err(|error| error.to_string())?;
+    database
+        .delete_clip(clip_id)
+        .map_err(|error| format!("Could not delete clip database record: {error}"))
 }
 
 fn save_manifest(recorder: &RecorderService) -> Result<(), String> {

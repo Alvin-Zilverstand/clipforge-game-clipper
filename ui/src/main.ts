@@ -1,3 +1,5 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
+
 type RecordingState =
   | "WaitingForGame"
   | "Buffering"
@@ -19,6 +21,9 @@ type Clip = {
   createdAt: string;
   uploadState: UploadState;
   path: string;
+  thumbnailPath: string | null;
+  videoUrl: string | null;
+  thumbnailUrl: string | null;
   tags: string[];
   colorClass: string;
 };
@@ -55,6 +60,7 @@ type ClipDto = {
   created_at: string;
   upload_state: UploadState;
   path: string;
+  thumbnail_path: string | null;
   tags: string[];
   color_class: string;
 };
@@ -115,6 +121,9 @@ const state: AppState = {
       createdAt: "Today 12:08",
       uploadState: "Local only",
       path: "",
+      thumbnailPath: null,
+      videoUrl: null,
+      thumbnailUrl: null,
       tags: ["clutch", "kill"],
       colorClass: "kill",
     },
@@ -128,6 +137,9 @@ const state: AppState = {
       createdAt: "Today 11:44",
       uploadState: "Queued",
       path: "",
+      thumbnailPath: null,
+      videoUrl: null,
+      thumbnailUrl: null,
       tags: ["objective"],
       colorClass: "objective",
     },
@@ -141,6 +153,9 @@ const state: AppState = {
       createdAt: "Yesterday 22:15",
       uploadState: "Uploaded",
       path: "",
+      thumbnailPath: null,
+      videoUrl: null,
+      thumbnailUrl: null,
       tags: ["teamfight"],
       colorClass: "manual",
     },
@@ -270,6 +285,9 @@ function clipFromDto(dto: ClipDto): Clip {
     createdAt: dto.created_at,
     uploadState: dto.upload_state,
     path: dto.path,
+    thumbnailPath: dto.thumbnail_path,
+    videoUrl: dto.path ? convertFileSrc(dto.path) : null,
+    thumbnailUrl: dto.thumbnail_path ? convertFileSrc(dto.thumbnail_path) : null,
     tags: dto.tags,
     colorClass: dto.color_class,
   };
@@ -278,7 +296,9 @@ function clipFromDto(dto: ClipDto): Clip {
 function renderClipCard(clip: Clip) {
   return `
     <article class="clip-card ${state.selectedClipId === clip.id ? "selected" : ""}" data-clip-id="${clip.id}">
-      <div class="thumb ${clip.colorClass}">${clip.event}</div>
+      <div class="thumb ${clip.colorClass}">
+        ${clip.thumbnailUrl ? `<img src="${clip.thumbnailUrl}" alt="" />` : clip.event}
+      </div>
       <h3>${clip.title}</h3>
       <p>${clip.game} · ${clip.source} · ${clip.duration}</p>
     </article>
@@ -298,7 +318,13 @@ function renderClipDetails(clip: Clip | undefined) {
 
   return `
     <aside class="detail-panel">
-      <div class="preview"><span>Preview</span></div>
+      <div class="preview">
+        ${
+          clip.videoUrl
+            ? `<video controls preload="metadata" src="${clip.videoUrl}" poster="${clip.thumbnailUrl ?? ""}"></video>`
+            : `<span>Preview</span>`
+        }
+      </div>
       <h2>${clip.title}</h2>
       <p class="muted">${clip.game} · ${clip.event} · ${clip.createdAt} · ${clip.uploadState}</p>
       <div class="tag-row">${clip.tags.map((tag) => `<span>${tag}</span>`).join("")}</div>
@@ -502,6 +528,9 @@ async function saveClip() {
     createdAt: "Just now",
     uploadState: "Local only",
     path: "",
+    thumbnailPath: null,
+    videoUrl: null,
+    thumbnailUrl: null,
     tags: ["manual"],
     colorClass: "manual",
   });

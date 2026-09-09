@@ -1,9 +1,11 @@
 pub mod capture;
+pub mod database;
 pub mod game_detection;
 pub mod hotkeys;
 pub mod integrations;
 pub mod jobs;
 pub mod library;
+pub mod media;
 pub mod models;
 pub mod recorder;
 pub mod settings;

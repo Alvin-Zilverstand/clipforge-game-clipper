@@ -31,7 +31,10 @@ pub struct CaptureConfig {
     pub fps: u32,
     pub bitrate_kbps: u32,
     pub encoder: EncoderPreference,
+    pub system_audio_enabled: bool,
     pub mic_enabled: bool,
+    pub system_audio_device: Option<String>,
+    pub mic_device: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,42 +129,125 @@ impl FfmpegRecordingPlan {
         output: impl Into<PathBuf>,
         config: &CaptureConfig,
     ) -> Self {
-        let preset = match config.encoder {
-            EncoderPreference::HardwareH264 => "h264_mf",
-            EncoderPreference::SoftwareH264 => "libx264",
-        };
         let output = output.into();
-        let size = format!("{}x{}", config.width, config.height);
-        let fps = config.fps.to_string();
-        let bitrate = format!("{}k", config.bitrate_kbps);
+
+        let mut args = base_desktop_input_args(config);
+        args.extend([
+            "-movflags".to_string(),
+            "+faststart".to_string(),
+            output.display().to_string(),
+        ]);
 
         Self {
             executable: executable.into(),
-            args: vec![
-                "-y".to_string(),
-                "-hide_banner".to_string(),
-                "-loglevel".to_string(),
-                "error".to_string(),
-                "-f".to_string(),
-                "gdigrab".to_string(),
-                "-framerate".to_string(),
-                fps,
-                "-video_size".to_string(),
-                size,
-                "-i".to_string(),
-                "desktop".to_string(),
-                "-c:v".to_string(),
-                preset.to_string(),
-                "-b:v".to_string(),
-                bitrate,
-                "-pix_fmt".to_string(),
-                "yuv420p".to_string(),
-                "-movflags".to_string(),
-                "+faststart".to_string(),
-                output.display().to_string(),
-            ],
+            args,
         }
     }
+
+    pub fn for_windows_desktop_segments(
+        executable: impl Into<PathBuf>,
+        output_pattern: impl Into<PathBuf>,
+        config: &CaptureConfig,
+        segment_duration: Duration,
+    ) -> Self {
+        let output_pattern = output_pattern.into();
+        let mut args = base_desktop_input_args(config);
+        args.extend([
+            "-f".to_string(),
+            "segment".to_string(),
+            "-segment_time".to_string(),
+            segment_duration.as_secs().max(1).to_string(),
+            "-reset_timestamps".to_string(),
+            "1".to_string(),
+            "-segment_format".to_string(),
+            "mp4".to_string(),
+            output_pattern.display().to_string(),
+        ]);
+
+        Self {
+            executable: executable.into(),
+            args,
+        }
+    }
+}
+
+fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
+    let preset = match config.encoder {
+        EncoderPreference::HardwareH264 => "h264_mf",
+        EncoderPreference::SoftwareH264 => "libx264",
+    };
+    let size = format!("{}x{}", config.width, config.height);
+    let fps = config.fps.to_string();
+    let bitrate = format!("{}k", config.bitrate_kbps);
+    let mut args = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-f".to_string(),
+        "gdigrab".to_string(),
+        "-framerate".to_string(),
+        fps,
+        "-video_size".to_string(),
+        size,
+        "-i".to_string(),
+        "desktop".to_string(),
+    ];
+    let mut next_input_index = 1;
+    let mut audio_maps = Vec::new();
+
+    if config.system_audio_enabled {
+        args.extend([
+            "-f".to_string(),
+            "wasapi".to_string(),
+            "-i".to_string(),
+            config
+                .system_audio_device
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        ]);
+        audio_maps.push(format!("{next_input_index}:a?"));
+        next_input_index += 1;
+    }
+
+    if config.mic_enabled {
+        args.extend([
+            "-f".to_string(),
+            "dshow".to_string(),
+            "-i".to_string(),
+            format!(
+                "audio={}",
+                config
+                    .mic_device
+                    .clone()
+                    .unwrap_or_else(|| "Microphone".to_string())
+            ),
+        ]);
+        audio_maps.push(format!("{next_input_index}:a?"));
+    }
+
+    args.extend([
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-c:v".to_string(),
+        preset.to_string(),
+        "-b:v".to_string(),
+        bitrate,
+        "-pix_fmt".to_string(),
+        "yuv420p".to_string(),
+    ]);
+    for audio_map in audio_maps {
+        args.extend(["-map".to_string(), audio_map]);
+    }
+    if config.system_audio_enabled || config.mic_enabled {
+        args.extend([
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "160k".to_string(),
+        ]);
+    }
+    args
 }
 
 #[derive(Debug)]
@@ -239,6 +325,96 @@ impl Drop for FfmpegCaptureBackend {
     }
 }
 
+#[derive(Debug)]
+pub struct FfmpegReplayCaptureBackend {
+    executable: PathBuf,
+    output_pattern: PathBuf,
+    segment_duration: Duration,
+    child: Option<Child>,
+}
+
+impl FfmpegReplayCaptureBackend {
+    pub fn new(
+        executable: impl Into<PathBuf>,
+        output_pattern: impl Into<PathBuf>,
+        segment_duration: Duration,
+    ) -> Self {
+        Self {
+            executable: executable.into(),
+            output_pattern: output_pattern.into(),
+            segment_duration,
+            child: None,
+        }
+    }
+
+    pub fn plan(&self, config: &CaptureConfig) -> FfmpegRecordingPlan {
+        FfmpegRecordingPlan::for_windows_desktop_segments(
+            &self.executable,
+            &self.output_pattern,
+            config,
+            self.segment_duration,
+        )
+    }
+}
+
+impl CaptureBackend for FfmpegReplayCaptureBackend {
+    fn name(&self) -> &'static str {
+        "ffmpeg-gdigrab-segments"
+    }
+
+    fn start(&mut self, config: CaptureConfig) -> Result<(), CaptureError> {
+        if self.child.is_some() {
+            return Ok(());
+        }
+
+        let plan = self.plan(&config);
+        let child = Command::new(&plan.executable)
+            .args(&plan.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| CaptureError::DeviceUnavailable(error.to_string()))?;
+        self.child = Some(child);
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), CaptureError> {
+        stop_ffmpeg_child(&mut self.child)
+    }
+}
+
+impl Drop for FfmpegReplayCaptureBackend {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn stop_ffmpeg_child(child: &mut Option<Child>) -> Result<(), CaptureError> {
+    if let Some(mut child) = child.take() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(b"q\n");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child
+                .try_wait()
+                .map_err(|error| CaptureError::DeviceUnavailable(error.to_string()))?
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,7 +428,10 @@ mod tests {
             fps: 30,
             bitrate_kbps: 6000,
             encoder: EncoderPreference::HardwareH264,
+            system_audio_enabled: false,
             mic_enabled: false,
+            system_audio_device: None,
+            mic_device: None,
         };
 
         let plan = FfmpegRecordingPlan::for_windows_desktop("ffmpeg", "out.mp4", &config);
@@ -260,5 +439,31 @@ mod tests {
         assert!(plan.args.contains(&"h264_mf".to_string()));
         assert!(plan.args.contains(&"1280x720".to_string()));
         assert!(plan.args.contains(&"6000k".to_string()));
+    }
+
+    #[test]
+    fn ffmpeg_segment_plan_uses_segment_muxer() {
+        let config = CaptureConfig {
+            source: CaptureSource::Desktop,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 6000,
+            encoder: EncoderPreference::HardwareH264,
+            system_audio_enabled: false,
+            mic_enabled: false,
+            system_audio_device: None,
+            mic_device: None,
+        };
+
+        let plan = FfmpegRecordingPlan::for_windows_desktop_segments(
+            "ffmpeg",
+            "segment-%05d.mp4",
+            &config,
+            Duration::from_secs(5),
+        );
+
+        assert!(plan.args.contains(&"segment".to_string()));
+        assert!(plan.args.contains(&"segment-%05d.mp4".to_string()));
     }
 }
