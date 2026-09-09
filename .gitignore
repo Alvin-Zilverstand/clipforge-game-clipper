@@ -1,0 +1,6 @@
+/target/
+/src-tauri/target/
+/node_modules/
+/ui/dist/
+/work/clipforge-library/
+*.pdb

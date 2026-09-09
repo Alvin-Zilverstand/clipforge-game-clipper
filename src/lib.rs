@@ -1,0 +1,15 @@
+pub mod capture;
+pub mod game_detection;
+pub mod hotkeys;
+pub mod integrations;
+pub mod jobs;
+pub mod library;
+pub mod models;
+pub mod recorder;
+pub mod settings;
+pub mod storage;
+pub mod upload;
+
+pub use models::{Clip, ClipSource, GameEvent, GameEventType, RecordingStatus, UploadProvider};
+pub use recorder::{AutoClipPolicy, EventDebouncer, RecorderService, ReplayBuffer};
+pub use settings::AppSettings;
