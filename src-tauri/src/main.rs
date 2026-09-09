@@ -6,22 +6,27 @@ use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
 use clipforge::game_watcher::running_processes;
 use clipforge::integrations::{
-    GameIntegration, IntegrationError, LeagueIntegration, LeagueLiveClientPoller,
+    valve_gsi_raw_events, GameIntegration, IntegrationError, LeagueIntegration,
+    LeagueLiveClientPoller, RawGameEvent, ValveGsiIntegration,
 };
 use clipforge::media::{
     collect_segments, concat_segments, generate_thumbnail, prune_old_segments, recent_segments,
     trim_clip as ffmpeg_trim_clip,
 };
-use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus, UploadProvider};
+use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::AppSettings;
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
+use clipforge::upload::{CatboxUploader, UploadMetadata, Uploader};
 use serde::Serialize;
 use std::env;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
@@ -30,6 +35,7 @@ struct AppRuntime {
     database: Mutex<ClipDatabase>,
     capture: Mutex<Option<ActiveCapture>>,
     league_poller: Mutex<LeagueLiveClientPoller>,
+    valve_events: Mutex<Vec<RawGameEvent>>,
 }
 
 #[derive(Debug)]
@@ -124,28 +130,48 @@ fn poll_auto_clip_events(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>,
         (session_id, game_id, active.started_at)
     };
 
-    if game_id != "league-of-legends" {
-        return Ok(Vec::new());
+    let mut created = Vec::new();
+    if game_id == "league-of-legends" {
+        let raw_events = {
+            let mut poller = runtime
+                .league_poller
+                .lock()
+                .map_err(|error| error.to_string())?;
+            match poller.poll_new_events(session_started_at) {
+                Ok(events) => events,
+                Err(IntegrationError::Http(_)) => Vec::new(),
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+
+        let integration = LeagueIntegration;
+        for raw_event in raw_events {
+            if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
+                if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
+                    created.push(clip);
+                }
+            }
+        }
     }
 
-    let raw_events = {
-        let mut poller = runtime
-            .league_poller
-            .lock()
-            .map_err(|error| error.to_string())?;
-        match poller.poll_new_events(session_started_at) {
-            Ok(events) => events,
-            Err(IntegrationError::Http(_)) => return Ok(Vec::new()),
-            Err(error) => return Err(error.to_string()),
-        }
-    };
-
-    let integration = LeagueIntegration;
-    let mut created = Vec::new();
-    for raw_event in raw_events {
-        if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
-            if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
-                created.push(clip);
+    if game_id == "counter-strike-2" || game_id == "dota-2" {
+        let raw_events = {
+            let mut queue = runtime
+                .valve_events
+                .lock()
+                .map_err(|error| error.to_string())?;
+            std::mem::take(&mut *queue)
+        };
+        let integration = if game_id == "counter-strike-2" {
+            ValveGsiIntegration::counter_strike_2()
+        } else {
+            ValveGsiIntegration::dota_2()
+        };
+        for raw_event in raw_events {
+            if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
+                if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
+                    created.push(clip);
+                }
             }
         }
     }
@@ -491,10 +517,30 @@ fn trim_clip(
 #[tauri::command]
 fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
-    let queued_url = format!("clipforge://upload-queued/{clip_id}");
+    let clip = recorder
+        .library
+        .all()
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .cloned()
+        .ok_or_else(|| format!("Clip {clip_id} was not found."))?;
+    if !clip.path.exists() {
+        return Err(format!("Clip file does not exist: {}", clip.path.display()));
+    }
+    let uploader = CatboxUploader::default();
+    let result = uploader
+        .upload(
+            &clip.path,
+            &UploadMetadata {
+                clip_id: clip.id.clone(),
+                game_id: clip.game_id.clone(),
+                title: clip.id.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
     if !recorder
         .library
-        .update_upload(&clip_id, UploadProvider::CustomHttp, queued_url)
+        .update_upload(&clip_id, result.provider, result.url)
     {
         return Err(format!("Clip {clip_id} was not found."));
     }
@@ -519,8 +565,10 @@ fn main() {
             database: Mutex::new(database),
             capture: Mutex::new(None),
             league_poller: Mutex::new(LeagueLiveClientPoller::default()),
+            valve_events: Mutex::new(Vec::new()),
         })
         .setup(|app| {
+            start_valve_gsi_receiver(app.handle().clone());
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::{
@@ -649,6 +697,36 @@ fn add_session_clip(
     recorder.library.add_clip(clip.clone());
     save_manifest(recorder)?;
     Ok(clip)
+}
+
+fn start_valve_gsi_receiver(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let Ok(listener) = TcpListener::bind("127.0.0.1:49321") else {
+            return;
+        };
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            let mut request = String::new();
+            if stream.read_to_string(&mut request).is_ok() {
+                if let Some(body) = request.split("\r\n\r\n").nth(1) {
+                    if let Ok(events) = valve_gsi_raw_events(body, SystemTime::now()) {
+                        if !events.is_empty() {
+                            let runtime = app.state::<AppRuntime>();
+                            if let Ok(mut queue) = runtime.valve_events.lock() {
+                                queue.extend(events);
+                            };
+                        }
+                    }
+                }
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK",
+            );
+        }
+    });
 }
 
 fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
