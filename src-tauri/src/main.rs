@@ -17,7 +17,9 @@ use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings};
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
-use clipforge::upload::{CatboxUploader, UploadMetadata, Uploader};
+use clipforge::upload::{
+    CatboxUploader, CustomHttpUploader, LitterboxUploader, UploadMetadata, Uploader,
+};
 use serde::Serialize;
 use std::env;
 use std::fs;
@@ -537,7 +539,13 @@ fn trim_clip(
 }
 
 #[tauri::command]
-fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
+fn upload_clip(
+    clip_id: String,
+    provider: Option<String>,
+    custom_endpoint: Option<String>,
+    custom_response_url_path: Option<String>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<ClipDto, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let clip = recorder
         .library
@@ -549,17 +557,27 @@ fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDt
     if !clip.path.exists() {
         return Err(format!("Clip file does not exist: {}", clip.path.display()));
     }
-    let uploader = CatboxUploader::default();
-    let result = uploader
-        .upload(
-            &clip.path,
-            &UploadMetadata {
-                clip_id: clip.id.clone(),
-                game_id: clip.game_id.clone(),
-                title: clip.id.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    let metadata = UploadMetadata {
+        clip_id: clip.id.clone(),
+        game_id: clip.game_id.clone(),
+        title: clip.id.clone(),
+    };
+    let result = match provider.as_deref().unwrap_or("catbox") {
+        "catbox" => CatboxUploader::default().upload(&clip.path, &metadata),
+        "litterbox" => LitterboxUploader::default().upload(&clip.path, &metadata),
+        "custom_http" => CustomHttpUploader {
+            endpoint: custom_endpoint.unwrap_or_default(),
+            method: "POST".to_string(),
+            multipart_field: "file".to_string(),
+            response_url_path: custom_response_url_path.unwrap_or_else(|| "url".to_string()),
+            headers: Vec::new(),
+        }
+        .upload(&clip.path, &metadata),
+        unknown => {
+            return Err(format!("Unsupported upload provider: {unknown}"));
+        }
+    }
+    .map_err(|error| error.to_string())?;
     if !recorder
         .library
         .update_upload(&clip_id, result.provider, result.url)

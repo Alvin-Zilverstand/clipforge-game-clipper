@@ -77,6 +77,9 @@ type AppState = {
   ffmpegPath: string | null;
   micEnabled: boolean;
   autoUpload: boolean;
+  uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
+  customUploadEndpoint: string;
+  customUploadResponsePath: string;
   selectedClipId: string;
   clips: Clip[];
   autoEvents: AutoEvent[];
@@ -109,6 +112,9 @@ const state: AppState = {
   ffmpegPath: null,
   micEnabled: false,
   autoUpload: false,
+  uploadProvider: "catbox",
+  customUploadEndpoint: "",
+  customUploadResponsePath: "url",
   selectedClipId: "clip-1",
   clips: [
     {
@@ -398,16 +404,30 @@ function renderAutoClipView() {
 }
 
 function renderUploadsView() {
+  const providers: Array<{ id: AppState["uploadProvider"]; title: string; body: string }> = [
+    { id: "catbox", title: "Catbox", body: "Anonymous or userhash-backed permanent uploads." },
+    { id: "litterbox", title: "Litterbox", body: "Temporary uploads with a 24 hour default expiry." },
+    { id: "custom_http", title: "Custom HTTP", body: "POST multipart clip files to your own endpoint." },
+    { id: "lustful", title: "Lustful", body: "Blocked until API details are confirmed." },
+  ];
   return `
     <section class="settings-grid">
-      ${["Catbox", "Litterbox", "Custom HTTP", "Lustful"].map((provider) => `
+      ${providers.map((provider) => `
         <article class="settings-panel">
           <p class="eyebrow">Provider</p>
-          <h2>${provider}</h2>
-          <p class="muted">${provider === "Lustful" ? "Stubbed until API details are confirmed." : "Optional; local clips remain available if upload fails."}</p>
-          <button>${provider === "Custom HTTP" ? "Configure" : "Enable"}</button>
+          <h2>${provider.title}</h2>
+          <p class="muted">${provider.body}</p>
+          <button class="${state.uploadProvider === provider.id ? "selected" : ""}" data-upload-provider="${provider.id}">
+            ${state.uploadProvider === provider.id ? "Selected" : "Select"}
+          </button>
         </article>
       `).join("")}
+      <article class="settings-panel">
+        <p class="eyebrow">Custom HTTP</p>
+        <h2>Endpoint</h2>
+        <label>URL <input value="${state.customUploadEndpoint}" data-action="custom-upload-endpoint" /></label>
+        <label>Response path <input value="${state.customUploadResponsePath}" data-action="custom-upload-response-path" /></label>
+      </article>
     </section>
   `;
 }
@@ -490,6 +510,21 @@ function bindEvents() {
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-upload']")?.addEventListener("change", (event) => {
     state.autoUpload = (event.target as HTMLInputElement).checked;
     render();
+  });
+
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-upload-provider]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.uploadProvider = button.dataset.uploadProvider as AppState["uploadProvider"];
+      render();
+    });
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-endpoint']")?.addEventListener("input", (event) => {
+    state.customUploadEndpoint = (event.target as HTMLInputElement).value;
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-response-path']")?.addEventListener("input", (event) => {
+    state.customUploadResponsePath = (event.target as HTMLInputElement).value;
   });
 
   appRoot.querySelectorAll<HTMLInputElement>("[data-event-id]").forEach((input) => {
@@ -623,7 +658,12 @@ async function uploadSelectedClip() {
   }
 
   try {
-    const dto = await tauriInvoke<ClipDto>("upload_clip", { clipId: state.selectedClipId });
+    const dto = await tauriInvoke<ClipDto>("upload_clip", {
+      clipId: state.selectedClipId,
+      provider: state.uploadProvider,
+      customEndpoint: state.customUploadEndpoint,
+      customResponseUrlPath: state.customUploadResponsePath,
+    });
     const updated = clipFromDto(dto);
     state.clips = state.clips.map((clip) => (clip.id === updated.id ? updated : clip));
     render();
