@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{Manager, State};
 
 struct AppRuntime {
     recorder: Mutex<RecorderService>,
@@ -105,6 +105,10 @@ fn list_clips(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
 
 #[tauri::command]
 fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
+    save_manual_clip_inner(seconds, runtime.inner())
+}
+
+fn save_manual_clip_inner(seconds: u64, runtime: &AppRuntime) -> Result<ClipDto, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     let Some(active) = capture.as_ref() else {
@@ -155,13 +159,17 @@ fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<Clip
         recorder.settings.replay_buffer,
         active.segment_duration,
     );
-    persist_clip(&runtime, &clip)?;
+    persist_clip(runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
 }
 
 #[tauri::command]
 fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    start_capture_inner(runtime.inner())
+}
+
+fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let mut capture = runtime.capture.lock().map_err(|error| error.to_string())?;
 
@@ -217,6 +225,10 @@ fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String
 
 #[tauri::command]
 fn stop_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    stop_capture_inner(runtime.inner())
+}
+
+fn stop_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let mut capture = runtime.capture.lock().map_err(|error| error.to_string())?;
 
@@ -241,7 +253,7 @@ fn stop_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String>
             if let Some(thumbnail_path) = &clip.thumbnail_path {
                 let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
             }
-            persist_clip(&runtime, &clip)?;
+            persist_clip(runtime, &clip)?;
         }
         if is_inside_root(&recorder.paths.buffer_root, &active.buffer_dir) {
             let _ = fs::remove_dir_all(&active.buffer_dir);
@@ -273,7 +285,7 @@ fn delete_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<Vec<Cl
         }
     }
 
-    delete_clip_record(&runtime, &clip_id)?;
+    delete_clip_record(runtime.inner(), &clip_id)?;
     save_manifest(&recorder)?;
     Ok(recorder.library.all().iter().map(clip_to_dto).collect())
 }
@@ -371,7 +383,7 @@ fn trim_clip(
         let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
     }
     recorder.library.add_clip(clip.clone());
-    persist_clip(&runtime, &clip)?;
+    persist_clip(runtime.inner(), &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
 }
@@ -393,7 +405,7 @@ fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDt
         .find(|clip| clip.id == clip_id)
         .cloned()
         .ok_or_else(|| format!("Clip {clip_id} was not found."))?;
-    persist_clip(&runtime, &clip)?;
+    persist_clip(runtime.inner(), &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
 }
@@ -406,6 +418,52 @@ fn main() {
             recorder: Mutex::new(recorder),
             database: Mutex::new(database),
             capture: Mutex::new(None),
+        })
+        .setup(|app| {
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::{
+                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
+                };
+
+                let clip_60 = Shortcut::new(None, Code::F8);
+                let clip_30 = Shortcut::new(Some(Modifiers::SHIFT), Code::F8);
+                let toggle_recording = Shortcut::new(Some(Modifiers::ALT), Code::F7);
+                let handler_clip_60 = clip_60.clone();
+                let handler_clip_30 = clip_30.clone();
+                let handler_toggle_recording = toggle_recording.clone();
+
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, shortcut, event| {
+                            if event.state() != ShortcutState::Pressed {
+                                return;
+                            }
+                            let runtime = app.state::<AppRuntime>();
+                            if shortcut == &handler_clip_60 {
+                                let _ = save_manual_clip_inner(60, runtime.inner());
+                            } else if shortcut == &handler_clip_30 {
+                                let _ = save_manual_clip_inner(30, runtime.inner());
+                            } else if shortcut == &handler_toggle_recording {
+                                let capture_active = runtime
+                                    .capture
+                                    .lock()
+                                    .map(|capture| capture.is_some())
+                                    .unwrap_or(false);
+                                if capture_active {
+                                    let _ = stop_capture_inner(runtime.inner());
+                                } else {
+                                    let _ = start_capture_inner(runtime.inner());
+                                }
+                            }
+                        })
+                        .build(),
+                )?;
+                app.global_shortcut().register(clip_60)?;
+                app.global_shortcut().register(clip_30)?;
+                app.global_shortcut().register(toggle_recording)?;
+            }
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
@@ -558,14 +616,14 @@ fn clip_to_dto(clip: &Clip) -> ClipDto {
     }
 }
 
-fn persist_clip(runtime: &State<'_, AppRuntime>, clip: &Clip) -> Result<(), String> {
+fn persist_clip(runtime: &AppRuntime, clip: &Clip) -> Result<(), String> {
     let database = runtime.database.lock().map_err(|error| error.to_string())?;
     database
         .upsert_clip(clip)
         .map_err(|error| format!("Could not save clip database record: {error}"))
 }
 
-fn delete_clip_record(runtime: &State<'_, AppRuntime>, clip_id: &str) -> Result<(), String> {
+fn delete_clip_record(runtime: &AppRuntime, clip_id: &str) -> Result<(), String> {
     let database = runtime.database.lock().map_err(|error| error.to_string())?;
     database
         .delete_clip(clip_id)
