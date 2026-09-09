@@ -4,6 +4,7 @@ use clipforge::capture::{
 };
 use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
+use clipforge::game_watcher::running_processes;
 use clipforge::media::{
     collect_segments, concat_segments, generate_thumbnail, prune_old_segments, recent_segments,
     trim_clip as ffmpeg_trim_clip,
@@ -72,6 +73,27 @@ struct ClipDto {
 fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn refresh_detected_game(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    let detected = detect_game(&running_processes(), &default_profiles());
+
+    match detected {
+        Some(game) => {
+            if recorder.state.detected_game_id.as_deref() != Some(&game.game_id) {
+                recorder.start_for_game(game.game_id, SystemTime::now());
+            }
+        }
+        None if capture.is_none() => {
+            let _ = recorder.stop();
+        }
+        None => {}
+    }
+
     Ok(status_from_recorder(&recorder, capture.as_ref()))
 }
 
@@ -387,6 +409,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
+            refresh_detected_game,
             list_clips,
             save_manual_clip,
             start_capture,

@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod database;
 pub mod game_detection;
+pub mod game_watcher;
 pub mod hotkeys;
 pub mod integrations;
 pub mod jobs;

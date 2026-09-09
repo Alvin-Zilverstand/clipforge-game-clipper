@@ -655,6 +655,20 @@ async function refreshClips() {
   }
 }
 
+async function refreshStatus() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("refresh_detected_game");
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not refresh detected game", error);
+  }
+}
+
 function parseTimestamp(value: string) {
   const parts = value.trim().split(":").map(Number);
   if (parts.some((part) => Number.isNaN(part))) {
@@ -687,6 +701,9 @@ async function loadDesktopBridge() {
     state.clips = clips.map(clipFromDto);
     state.selectedClipId = state.clips[0]?.id ?? "";
     render();
+    window.setInterval(() => {
+      void refreshStatus();
+    }, 3_000);
   } catch (error) {
     console.warn("Tauri bridge unavailable", error);
   }
