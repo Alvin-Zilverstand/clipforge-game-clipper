@@ -1,6 +1,7 @@
 use clipforge::capture::{
-    ffmpeg_is_available, ffmpeg_supports_input_device, find_ffmpeg_executable, CaptureBackend,
-    CaptureConfig, CaptureSource, EncoderPreference, FfmpegReplayCaptureBackend,
+    ffmpeg_is_available, ffmpeg_supports_filter, ffmpeg_supports_input_device,
+    find_ffmpeg_executable, CaptureBackend, CaptureConfig, CaptureMethod, CaptureSource,
+    EncoderPreference, FfmpegReplayCaptureBackend,
 };
 use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
@@ -67,6 +68,7 @@ struct DesktopStatus {
     ffmpeg_available: bool,
     ffmpeg_path: Option<String>,
     system_audio_available: bool,
+    desktop_duplication_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -400,8 +402,14 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let segment_pattern = buffer_dir.join("segment-%05d.mp4");
 
     let system_audio_enabled = ffmpeg_supports_input_device(&ffmpeg, "wasapi");
+    let method = if ffmpeg_supports_filter(&ffmpeg, "ddagrab") {
+        CaptureMethod::DesktopDuplication
+    } else {
+        CaptureMethod::GdiGrab
+    };
     let config = CaptureConfig {
         source: CaptureSource::Desktop,
+        method,
         width: recorder.settings.quality.width,
         height: recorder.settings.quality.height,
         fps: recorder.settings.quality.fps,
@@ -845,6 +853,9 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         ffmpeg_path: find_ffmpeg_executable().map(|path| path.display().to_string()),
         system_audio_available: find_ffmpeg_executable()
             .map(|path| ffmpeg_supports_input_device(&path, "wasapi"))
+            .unwrap_or(false),
+        desktop_duplication_available: find_ffmpeg_executable()
+            .map(|path| ffmpeg_supports_filter(&path, "ddagrab"))
             .unwrap_or(false),
     }
 }

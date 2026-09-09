@@ -50,6 +50,7 @@ type DesktopStatus = {
   ffmpeg_available: boolean;
   ffmpeg_path: string | null;
   system_audio_available: boolean;
+  desktop_duplication_available: boolean;
 };
 
 type ClipDto = {
@@ -83,6 +84,7 @@ type AppState = {
   ffmpegAvailable: boolean;
   ffmpegPath: string | null;
   systemAudioAvailable: boolean;
+  desktopDuplicationAvailable: boolean;
   micEnabled: boolean;
   autoRecordEnabled: boolean;
   autoUpload: boolean;
@@ -121,6 +123,7 @@ const state: AppState = {
   ffmpegAvailable: false,
   ffmpegPath: null,
   systemAudioAvailable: false,
+  desktopDuplicationAvailable: false,
   micEnabled: false,
   autoRecordEnabled: false,
   autoUpload: false,
@@ -378,6 +381,7 @@ function renderRecordingView() {
         <p class="eyebrow">Capture</p>
         <h2>720p30 Performance</h2>
         <p class="muted">Lightweight desktop capture uses bundled FFmpeg when system FFmpeg is missing.</p>
+        <p class="muted">${state.desktopDuplicationAvailable ? "Desktop Duplication capture available" : "Using GDI capture fallback"}</p>
         <p class="muted">${state.ffmpegAvailable ? "FFmpeg ready" : "FFmpeg missing"}${state.ffmpegPath ? ` · ${state.ffmpegPath}` : ""}</p>
         <p class="muted">${state.capturePath ? `Writing ${state.capturePath}` : "No active capture file"}</p>
       </article>
@@ -638,6 +642,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.ffmpegAvailable = status.ffmpeg_available;
   state.ffmpegPath = status.ffmpeg_path;
   state.systemAudioAvailable = status.system_audio_available;
+  state.desktopDuplicationAvailable = status.desktop_duplication_available;
 }
 
 async function trimSelectedClip() {

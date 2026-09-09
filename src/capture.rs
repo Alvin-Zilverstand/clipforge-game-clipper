@@ -24,8 +24,15 @@ pub enum EncoderPreference {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureMethod {
+    DesktopDuplication,
+    GdiGrab,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfig {
     pub source: CaptureSource,
+    pub method: CaptureMethod,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -135,6 +142,23 @@ pub fn ffmpeg_supports_input_device(executable: &std::path::Path, device: &str) 
         .any(|line| line.contains('D') && line.split_whitespace().any(|part| part == device))
 }
 
+pub fn ffmpeg_supports_filter(executable: &std::path::Path, filter: &str) -> bool {
+    let Ok(output) = Command::new(executable)
+        .args(["-hide_banner", "-filters"])
+        .output()
+    else {
+        return false;
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    combined
+        .lines()
+        .any(|line| line.split_whitespace().any(|part| part == filter))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegRecordingPlan {
     pub executable: PathBuf,
@@ -202,15 +226,25 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
-        "-f".to_string(),
-        "gdigrab".to_string(),
-        "-framerate".to_string(),
-        fps,
-        "-video_size".to_string(),
-        size,
-        "-i".to_string(),
-        "desktop".to_string(),
     ];
+    match config.method {
+        CaptureMethod::DesktopDuplication => args.extend([
+            "-f".to_string(),
+            "lavfi".to_string(),
+            "-i".to_string(),
+            format!("ddagrab=framerate={fps}:video_size={size},hwdownload,format=bgra"),
+        ]),
+        CaptureMethod::GdiGrab => args.extend([
+            "-f".to_string(),
+            "gdigrab".to_string(),
+            "-framerate".to_string(),
+            fps,
+            "-video_size".to_string(),
+            size,
+            "-i".to_string(),
+            "desktop".to_string(),
+        ]),
+    }
     let mut next_input_index = 1;
     let mut audio_maps = Vec::new();
 
@@ -385,15 +419,12 @@ impl CaptureBackend for FfmpegReplayCaptureBackend {
             return Ok(());
         }
 
-        let plan = self.plan(&config);
-        let child = Command::new(&plan.executable)
-            .args(&plan.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| CaptureError::DeviceUnavailable(error.to_string()))?;
-        self.child = Some(child);
+        self.child = Some(spawn_ffmpeg(&self.plan(&config))?);
+        if child_exited(&mut self.child)? && config.method == CaptureMethod::DesktopDuplication {
+            let mut fallback_config = config;
+            fallback_config.method = CaptureMethod::GdiGrab;
+            self.child = Some(spawn_ffmpeg(&self.plan(&fallback_config))?);
+        }
         Ok(())
     }
 
@@ -405,6 +436,33 @@ impl CaptureBackend for FfmpegReplayCaptureBackend {
 impl Drop for FfmpegReplayCaptureBackend {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+fn spawn_ffmpeg(plan: &FfmpegRecordingPlan) -> Result<Child, CaptureError> {
+    Command::new(&plan.executable)
+        .args(&plan.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| CaptureError::DeviceUnavailable(error.to_string()))
+}
+
+fn child_exited(child: &mut Option<Child>) -> Result<bool, CaptureError> {
+    thread::sleep(Duration::from_millis(500));
+    let Some(running_child) = child.as_mut() else {
+        return Ok(false);
+    };
+    if running_child
+        .try_wait()
+        .map_err(|error| CaptureError::DeviceUnavailable(error.to_string()))?
+        .is_some()
+    {
+        *child = None;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -441,6 +499,7 @@ mod tests {
     fn ffmpeg_plan_prefers_media_foundation_h264() {
         let config = CaptureConfig {
             source: CaptureSource::Desktop,
+            method: CaptureMethod::GdiGrab,
             width: 1280,
             height: 720,
             fps: 30,
@@ -463,6 +522,7 @@ mod tests {
     fn ffmpeg_segment_plan_uses_segment_muxer() {
         let config = CaptureConfig {
             source: CaptureSource::Desktop,
+            method: CaptureMethod::DesktopDuplication,
             width: 1280,
             height: 720,
             fps: 30,
@@ -482,6 +542,7 @@ mod tests {
         );
 
         assert!(plan.args.contains(&"segment".to_string()));
+        assert!(plan.args.iter().any(|arg| arg.contains("ddagrab")));
         assert!(plan.args.contains(&"segment-%05d.mp4".to_string()));
     }
 
