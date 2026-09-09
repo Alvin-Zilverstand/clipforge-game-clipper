@@ -10,6 +10,7 @@
 - Runtime FFmpeg detection checks the bundled sidecar first and then system PATH.
 - Tauri commands exist for status, live game detection, clip listing, manual clip creation, auto-clip polling, Start Capture, Stop Capture, clip delete, reveal in Explorer, trim, upload, and settings updates.
 - Start Capture launches a rolling FFmpeg segmented replay recorder with a low-spec default profile: 720p30 at 6 Mbps using Media Foundation H.264 when available.
+- Capture prefers FFmpeg's Windows Desktop Duplication `ddagrab` filter when available and falls back to `gdigrab`; a local smoke test produced a real MP4 segment with `ddagrab`.
 - Stop Capture asks FFmpeg to finalize gracefully, falls back after a short timeout, concatenates recorded segments, and adds the completed full-session MP4 to the local library.
 - Manual clips now extract from the rolling segment buffer instead of writing placeholder MP4 files.
 - Auto clips now use the same segment extraction/thumbnail pipeline as manual clips.
@@ -34,15 +35,15 @@
 ## Not Fully Working Yet
 
 - Native Windows Graphics Capture is still a trait/stub boundary; FFmpeg `gdigrab` is the current MVP bridge.
-- WASAPI/system-audio capture is configured through FFmpeg arguments, but native Rust WASAPI capture/mixing and device selection are not implemented yet.
+- WASAPI/system-audio capture is enabled only when the selected FFmpeg build exposes a WASAPI input device; the current local FFmpeg build does not, so video capture remains enabled while system-audio capture is marked unavailable.
 - Capture has not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
 - Upload provider configuration UI is not complete; Catbox is live from the default Upload action, but Litterbox/custom HTTP need UI selection and configuration.
-- Valve GSI receiver is a lightweight MVP receiver; it still needs generated game config files and richer event mapping per game.
+- Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen, but richer event mapping per game is still needed.
 - Auto start/stop is conservative: live process detection updates the current game/session state, but capture still starts from explicit user action/hotkey.
 
 ## Next Engineering Steps
 
-1. Replace FFmpeg `gdigrab` with native Windows Graphics Capture for lower overhead.
+1. Replace the FFmpeg Desktop Duplication/GDI bridge with native Windows Graphics Capture for lower overhead and better game/window targeting.
 2. Add native Rust WASAPI capture/mixing and audio device selection.
 3. Add upload provider configuration UI for Litterbox/custom HTTP.
 4. Generate CS2/Dota GSI config files and expand event mapping.
