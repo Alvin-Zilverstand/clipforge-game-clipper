@@ -57,6 +57,7 @@ struct DesktopStatus {
     detected_game: Option<String>,
     replay_buffer_seconds: u64,
     mic_enabled: bool,
+    auto_record_enabled: bool,
     upload_enabled: bool,
     session_recording: bool,
     capture_active: bool,
@@ -99,23 +100,37 @@ fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
 
 #[tauri::command]
 fn refresh_detected_game(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
-    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
-    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     let detected = detect_game(&running_processes(), &default_profiles());
+    let mut should_auto_start = false;
 
-    match detected {
-        Some(game) => {
-            if recorder.state.detected_game_id.as_deref() != Some(&game.game_id) {
-                recorder.start_for_game(game.game_id, SystemTime::now());
+    {
+        let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+        let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+
+        match detected {
+            Some(game) => {
+                should_auto_start = game.process.process_name.len() > 0
+                    && default_profiles()
+                        .iter()
+                        .any(|profile| profile.game_id == game.game_id && profile.auto_record)
+                    && capture.is_none()
+                    && !recorder.settings.privacy.desktop_capture_requires_confirmation;
+                if recorder.state.detected_game_id.as_deref() != Some(&game.game_id) {
+                    recorder.start_for_game(game.game_id, SystemTime::now());
+                }
             }
+            None if capture.is_none() => {
+                let _ = recorder.stop();
+            }
+            None => {}
         }
-        None if capture.is_none() => {
-            let _ = recorder.stop();
+
+        if !should_auto_start {
+            return Ok(status_from_recorder(&recorder, capture.as_ref()));
         }
-        None => {}
     }
 
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    start_capture_inner(runtime.inner())
 }
 
 #[tauri::command]
@@ -140,6 +155,19 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     recorder.settings.privacy.mic_enabled = enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_auto_record_enabled(
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.privacy.desktop_capture_requires_confirmation = !enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref()))
@@ -686,6 +714,7 @@ fn main() {
             list_clips,
             set_replay_buffer,
             set_mic_enabled,
+            set_auto_record_enabled,
             write_gsi_configs,
             poll_auto_clip_events,
             save_manual_clip,
@@ -805,6 +834,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         detected_game: recorder.state.detected_game_id.clone(),
         replay_buffer_seconds: recorder.settings.replay_buffer.as_secs(),
         mic_enabled: recorder.settings.privacy.mic_enabled,
+        auto_record_enabled: !recorder.settings.privacy.desktop_capture_requires_confirmation,
         upload_enabled: false,
         session_recording: matches!(recorder.state.status, RecordingStatus::RecordingSession),
         capture_active: capture.is_some(),

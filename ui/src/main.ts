@@ -40,6 +40,7 @@ type DesktopStatus = {
   detected_game: string | null;
   replay_buffer_seconds: number;
   mic_enabled: boolean;
+  auto_record_enabled: boolean;
   upload_enabled: boolean;
   session_recording: boolean;
   capture_active: boolean;
@@ -83,6 +84,7 @@ type AppState = {
   ffmpegPath: string | null;
   systemAudioAvailable: boolean;
   micEnabled: boolean;
+  autoRecordEnabled: boolean;
   autoUpload: boolean;
   uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
   customUploadEndpoint: string;
@@ -120,6 +122,7 @@ const state: AppState = {
   ffmpegPath: null,
   systemAudioAvailable: false,
   micEnabled: false,
+  autoRecordEnabled: false,
   autoUpload: false,
   uploadProvider: "catbox",
   customUploadEndpoint: "",
@@ -453,6 +456,7 @@ function renderSettingsView() {
       <article class="settings-panel">
         <p class="eyebrow">Privacy</p>
         <h2>Local-first</h2>
+        <label class="toggle"><input type="checkbox" ${state.autoRecordEnabled ? "checked" : ""} data-action="toggle-auto-record" /> Start recording when a supported game is detected</label>
         <label class="toggle"><input type="checkbox" ${state.autoUpload ? "checked" : ""} data-action="toggle-auto-upload" /> Auto-upload after clipping</label>
       </article>
       <article class="settings-panel">
@@ -529,6 +533,12 @@ function bindEvents() {
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-upload']")?.addEventListener("change", (event) => {
     state.autoUpload = (event.target as HTMLInputElement).checked;
     render();
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-record']")?.addEventListener("change", (event) => {
+    state.autoRecordEnabled = (event.target as HTMLInputElement).checked;
+    render();
+    void saveAutoRecordSetting(state.autoRecordEnabled);
   });
 
   appRoot.querySelectorAll<HTMLButtonElement>("[data-upload-provider]").forEach((button) => {
@@ -620,6 +630,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.detectedGame = status.detected_game ?? "Waiting for game";
   state.replayBufferSeconds = status.replay_buffer_seconds;
   state.micEnabled = status.mic_enabled;
+  state.autoRecordEnabled = status.auto_record_enabled;
   state.autoUpload = status.upload_enabled;
   state.sessionRecording = status.session_recording;
   state.captureActive = status.capture_active;
@@ -759,6 +770,20 @@ async function saveMicSetting(enabled: boolean) {
     render();
   } catch (error) {
     console.warn("Could not save mic setting", error);
+  }
+}
+
+async function saveAutoRecordSetting(enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_auto_record_enabled", { enabled });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save auto-record setting", error);
   }
 }
 
