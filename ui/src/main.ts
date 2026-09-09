@@ -477,10 +477,14 @@ function bindEvents() {
     state.replayBufferSeconds = Number((event.target as HTMLInputElement).value);
     render();
   });
+  appRoot.querySelector<HTMLInputElement>("[data-action='buffer-length']")?.addEventListener("change", (event) => {
+    void saveReplayBufferSetting(Number((event.target as HTMLInputElement).value));
+  });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-mic']")?.addEventListener("change", (event) => {
     state.micEnabled = (event.target as HTMLInputElement).checked;
     render();
+    void saveMicSetting(state.micEnabled);
   });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-upload']")?.addEventListener("change", (event) => {
@@ -652,6 +656,34 @@ async function refreshClips() {
   state.clips = clips.map(clipFromDto);
   if (!state.clips.some((clip) => clip.id === state.selectedClipId)) {
     state.selectedClipId = state.clips[0]?.id ?? "";
+  }
+}
+
+async function saveReplayBufferSetting(seconds: number) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_replay_buffer", { seconds });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save replay buffer setting", error);
+  }
+}
+
+async function saveMicSetting(enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_mic_enabled", { enabled });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save mic setting", error);
   }
 }
 

@@ -1,8 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityPreset {
     pub name: String,
     pub width: u32,
@@ -11,7 +15,7 @@ pub struct QualityPreset {
     pub bitrate_kbps: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HotkeySettings {
     pub clip_last_60s: String,
     pub clip_last_30s: String,
@@ -19,7 +23,7 @@ pub struct HotkeySettings {
     pub screenshot: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacySettings {
     pub mic_enabled: bool,
     pub desktop_capture_requires_confirmation: bool,
@@ -27,7 +31,7 @@ pub struct PrivacySettings {
     pub upload_requires_confirmation: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoClipSettings {
     pub enabled: bool,
     pub pre_roll: Duration,
@@ -36,7 +40,7 @@ pub struct AutoClipSettings {
     pub enabled_events_by_game: BTreeMap<String, BTreeSet<String>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppSettings {
     pub schema_version: u32,
     pub clip_root: PathBuf,
@@ -94,5 +98,63 @@ impl AppSettings {
         self.replay_buffer = self
             .replay_buffer
             .clamp(Duration::from_secs(15), Duration::from_secs(600));
+    }
+}
+
+pub fn load_or_create_settings(root: impl Into<PathBuf>) -> io::Result<AppSettings> {
+    let root = root.into();
+    let path = settings_path(&root);
+    if path.exists() {
+        let mut settings: AppSettings = serde_json::from_str(&fs::read_to_string(&path)?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        settings.clamp_replay_buffer();
+        Ok(settings)
+    } else {
+        let settings = AppSettings::default_for_root(&root);
+        save_settings(&root, &settings)?;
+        Ok(settings)
+    }
+}
+
+pub fn save_settings(root: impl Into<PathBuf>, settings: &AppSettings) -> io::Result<()> {
+    let root = root.into();
+    fs::create_dir_all(&root)?;
+    let contents = serde_json::to_string_pretty(settings)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    fs::write(settings_path(&root), contents)
+}
+
+pub fn settings_path(root: impl Into<PathBuf>) -> PathBuf {
+    root.into().join("settings.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_round_trip_as_versioned_json() {
+        let root =
+            std::env::temp_dir().join(format!("clipforge-settings-{}", SystemTimeCompat::millis()));
+        let mut settings = AppSettings::default_for_root(&root);
+        settings.replay_buffer = Duration::from_secs(120);
+
+        save_settings(&root, &settings).expect("save");
+        let loaded = load_or_create_settings(&root).expect("load");
+
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.replay_buffer, Duration::from_secs(120));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    struct SystemTimeCompat;
+
+    impl SystemTimeCompat {
+        fn millis() -> u128 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        }
     }
 }

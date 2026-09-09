@@ -15,7 +15,7 @@ use clipforge::media::{
 };
 use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
 use clipforge::recorder::{RecorderAction, RecorderService};
-use clipforge::settings::AppSettings;
+use clipforge::settings::{load_or_create_settings, save_settings};
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
 use clipforge::upload::{CatboxUploader, UploadMetadata, Uploader};
 use serde::Serialize;
@@ -31,6 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
 
 struct AppRuntime {
+    library_root: PathBuf,
     recorder: Mutex<RecorderService>,
     database: Mutex<ClipDatabase>,
     capture: Mutex<Option<ActiveCapture>>,
@@ -111,6 +112,27 @@ fn refresh_detected_game(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus
 fn list_clips(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     Ok(recorder.library.all().iter().map(clip_to_dto).collect())
+}
+
+#[tauri::command]
+fn set_replay_buffer(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.replay_buffer = Duration::from_secs(seconds);
+    recorder.settings.clamp_replay_buffer();
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.privacy.mic_enabled = enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -557,10 +579,12 @@ fn upload_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<ClipDt
 }
 
 fn main() {
-    let (recorder, database) = create_runtime().expect("could not initialize ClipForge runtime");
+    let (library_root, recorder, database) =
+        create_runtime().expect("could not initialize ClipForge runtime");
 
     tauri::Builder::default()
         .manage(AppRuntime {
+            library_root,
             recorder: Mutex::new(recorder),
             database: Mutex::new(database),
             capture: Mutex::new(None),
@@ -618,6 +642,8 @@ fn main() {
             get_status,
             refresh_detected_game,
             list_clips,
+            set_replay_buffer,
+            set_mic_enabled,
             poll_auto_clip_events,
             save_manual_clip,
             start_capture,
@@ -631,11 +657,12 @@ fn main() {
         .expect("error while running ClipForge desktop shell");
 }
 
-fn create_runtime() -> Result<(RecorderService, ClipDatabase), String> {
+fn create_runtime() -> Result<(PathBuf, RecorderService, ClipDatabase), String> {
     let root = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("clipforge-library");
-    let settings = AppSettings::default_for_root(&root);
+    let settings = load_or_create_settings(&root)
+        .map_err(|error| format!("Could not load settings: {error}"))?;
     let paths = LibraryPaths::new(&root);
     paths.ensure().map_err(|error| error.to_string())?;
     let database = ClipDatabase::open(root.join("library.sqlite"))
@@ -649,7 +676,7 @@ fn create_runtime() -> Result<(RecorderService, ClipDatabase), String> {
     }
 
     let _ = detect_game(&[], &default_profiles());
-    Ok((recorder, database))
+    Ok((root, recorder, database))
 }
 
 fn add_session_clip(
