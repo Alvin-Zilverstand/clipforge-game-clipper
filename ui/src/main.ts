@@ -48,6 +48,7 @@ type DesktopStatus = {
   library_root: string;
   ffmpeg_available: boolean;
   ffmpeg_path: string | null;
+  system_audio_available: boolean;
 };
 
 type ClipDto = {
@@ -75,6 +76,7 @@ type AppState = {
   capturePath: string | null;
   ffmpegAvailable: boolean;
   ffmpegPath: string | null;
+  systemAudioAvailable: boolean;
   micEnabled: boolean;
   autoUpload: boolean;
   uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
@@ -110,6 +112,7 @@ const state: AppState = {
   capturePath: null,
   ffmpegAvailable: false,
   ffmpegPath: null,
+  systemAudioAvailable: false,
   micEnabled: false,
   autoUpload: false,
   uploadProvider: "catbox",
@@ -370,7 +373,8 @@ function renderRecordingView() {
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Audio</p>
-        <h2>System audio on</h2>
+        <h2>${state.systemAudioAvailable ? "System audio ready" : "System audio unavailable"}</h2>
+        <p class="muted">${state.systemAudioAvailable ? "FFmpeg reports WASAPI input support." : "This FFmpeg build does not expose WASAPI; video recording still works."}</p>
         <label class="toggle"><input type="checkbox" ${state.micEnabled ? "checked" : ""} data-action="toggle-mic" /> Mic capture</label>
       </article>
     </section>
@@ -607,6 +611,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.capturePath = status.capture_path;
   state.ffmpegAvailable = status.ffmpeg_available;
   state.ffmpegPath = status.ffmpeg_path;
+  state.systemAudioAvailable = status.system_audio_available;
 }
 
 async function trimSelectedClip() {

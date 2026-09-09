@@ -1,6 +1,6 @@
 use clipforge::capture::{
-    ffmpeg_is_available, find_ffmpeg_executable, CaptureBackend, CaptureConfig, CaptureSource,
-    EncoderPreference, FfmpegReplayCaptureBackend,
+    ffmpeg_is_available, ffmpeg_supports_input_device, find_ffmpeg_executable, CaptureBackend,
+    CaptureConfig, CaptureSource, EncoderPreference, FfmpegReplayCaptureBackend,
 };
 use clipforge::database::ClipDatabase;
 use clipforge::game_detection::{default_profiles, detect_game};
@@ -64,6 +64,7 @@ struct DesktopStatus {
     library_root: String,
     ffmpeg_available: bool,
     ffmpeg_path: Option<String>,
+    system_audio_available: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +349,7 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let segment_duration = Duration::from_secs(5);
     let segment_pattern = buffer_dir.join("segment-%05d.mp4");
 
+    let system_audio_enabled = ffmpeg_supports_input_device(&ffmpeg, "wasapi");
     let config = CaptureConfig {
         source: CaptureSource::Desktop,
         width: recorder.settings.quality.width,
@@ -355,7 +357,7 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         fps: recorder.settings.quality.fps,
         bitrate_kbps: recorder.settings.quality.bitrate_kbps,
         encoder: EncoderPreference::HardwareH264,
-        system_audio_enabled: true,
+        system_audio_enabled,
         mic_enabled: recorder.settings.privacy.mic_enabled,
         system_audio_device: None,
         mic_device: None,
@@ -788,6 +790,9 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         library_root: recorder.paths.clip_root.display().to_string(),
         ffmpeg_available: ffmpeg_is_available(),
         ffmpeg_path: find_ffmpeg_executable().map(|path| path.display().to_string()),
+        system_audio_available: find_ffmpeg_executable()
+            .map(|path| ffmpeg_supports_input_device(&path, "wasapi"))
+            .unwrap_or(false),
     }
 }
 

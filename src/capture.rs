@@ -117,6 +117,24 @@ pub fn find_ffmpeg_executable() -> Option<PathBuf> {
 pub fn ffmpeg_is_available() -> bool {
     find_ffmpeg_executable().is_some()
 }
+
+pub fn ffmpeg_supports_input_device(executable: &std::path::Path, device: &str) -> bool {
+    let Ok(output) = Command::new(executable)
+        .args(["-hide_banner", "-devices"])
+        .output()
+    else {
+        return false;
+    };
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    combined
+        .lines()
+        .any(|line| line.contains('D') && line.split_whitespace().any(|part| part == device))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegRecordingPlan {
     pub executable: PathBuf,
@@ -465,5 +483,13 @@ mod tests {
 
         assert!(plan.args.contains(&"segment".to_string()));
         assert!(plan.args.contains(&"segment-%05d.mp4".to_string()));
+    }
+
+    #[test]
+    fn device_parser_ignores_unknown_executable() {
+        assert!(!ffmpeg_supports_input_device(
+            PathBuf::from("definitely-missing-ffmpeg.exe").as_path(),
+            "wasapi"
+        ));
     }
 }
