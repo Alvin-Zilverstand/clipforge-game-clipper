@@ -168,13 +168,13 @@ pub fn trim_duration(start: Duration, end: Duration) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{build_placeholder_clip, LibraryPaths};
+    use crate::storage::{build_test_clip, LibraryPaths};
 
     #[test]
     fn filters_by_game_and_tag() {
         let paths = LibraryPaths::new("root");
         let mut library = ClipLibrary::new();
-        let mut clip = build_placeholder_clip(
+        let mut clip = build_test_clip(
             &paths,
             "clip",
             "session",
@@ -197,7 +197,7 @@ mod tests {
     fn manifest_contains_clip_rows() {
         let paths = LibraryPaths::new("root");
         let mut library = ClipLibrary::new();
-        library.add_clip(build_placeholder_clip(
+        library.add_clip(build_test_clip(
             &paths,
             "clip",
             "session",

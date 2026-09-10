@@ -126,8 +126,8 @@ let tauriInvoke: (<T>(command: string, args?: Record<string, unknown>) => Promis
 
 const state: AppState = {
   activeView: "Library",
-  recordingState: "Buffering",
-  detectedGame: "Counter-Strike 2",
+  recordingState: "WaitingForGame",
+  detectedGame: "Waiting for game",
   replayBufferSeconds: 60,
   systemAudioEnabled: true,
   sessionRecording: false,
@@ -147,57 +147,8 @@ const state: AppState = {
   customUploadEndpoint: "",
   customUploadResponsePath: "url",
   gsiConfigStatus: "",
-  selectedClipId: "clip-1",
-  clips: [
-    {
-      id: "clip-1",
-      title: "Dust II clutch",
-      game: "Counter-Strike 2",
-      event: "Kill",
-      source: "Auto Event",
-      duration: "0:18",
-      createdAt: "Today 12:08",
-      uploadState: "Local only",
-      path: "",
-      thumbnailPath: null,
-      videoUrl: null,
-      thumbnailUrl: null,
-      tags: ["clutch", "kill"],
-      colorClass: "kill",
-    },
-    {
-      id: "clip-2",
-      title: "Baron steal",
-      game: "League of Legends",
-      event: "Objective",
-      source: "Auto Event",
-      duration: "0:22",
-      createdAt: "Today 11:44",
-      uploadState: "Queued",
-      path: "",
-      thumbnailPath: null,
-      videoUrl: null,
-      thumbnailUrl: null,
-      tags: ["objective"],
-      colorClass: "objective",
-    },
-    {
-      id: "clip-3",
-      title: "Manual save",
-      game: "Dota 2",
-      event: "Manual",
-      source: "Manual Hotkey",
-      duration: "1:00",
-      createdAt: "Yesterday 22:15",
-      uploadState: "Uploaded",
-      path: "",
-      thumbnailPath: null,
-      videoUrl: null,
-      thumbnailUrl: null,
-      tags: ["teamfight"],
-      colorClass: "manual",
-    },
-  ],
+  selectedClipId: "",
+  clips: [],
   autoEvents: [
     { id: "cs2-kill", game: "Counter-Strike 2", event: "Kill", enabled: true },
     { id: "cs2-round", game: "Counter-Strike 2", event: "Round win", enabled: true },
@@ -267,7 +218,7 @@ function renderRecordingBar() {
   `;
 }
 
-function renderActiveView(selectedClip: Clip) {
+function renderActiveView(selectedClip: Clip | undefined) {
   switch (state.activeView) {
     case "Recording":
       return renderRecordingView();
@@ -366,7 +317,7 @@ function renderClipDetails(clip: Clip | undefined) {
       <h2>${clip.title}</h2>
       <p class="muted">${clip.game} · ${clip.event} · ${clip.createdAt} · ${clip.uploadState}</p>
       <div class="tag-row">${clip.tags.map((tag) => `<span>${tag}</span>`).join("")}</div>
-      <p class="muted file-path">${clip.path || "Demo clip; no local file yet"}</p>
+      <p class="muted file-path">${clip.path || "Clip file unavailable"}</p>
       <div class="trim-row">
         <label>Start <input value="00:00" data-action="trim-start" /></label>
         <label>End <input value="${clip.duration}" data-action="trim-end" /></label>

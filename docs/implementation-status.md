@@ -30,7 +30,7 @@
 - A backend worker loop now refreshes game detection and drains auto-clip integrations while the desktop app is running, independent of the currently selected UI view.
 - Local clip library can add, filter, remove, update upload state, write a tab-separated manifest, and persist clip metadata in SQLite.
 - Versioned local settings are saved to `settings.json`; replay buffer length and mic toggle are wired from the UI to Rust.
-- Storage layer creates the planned folders, sanitizes clip paths, keeps placeholder helpers for tests/demo paths, and cleans oldest temporary files under a size limit.
+- Storage layer creates the planned folders, sanitizes clip paths, provides test clip builders for unit coverage, and cleans oldest temporary files under a size limit.
 - Upload adapters perform live HTTP uploads for Catbox, Litterbox, and custom multipart endpoints; Lustful remains blocked behind unknown API details.
 - The UI Upload button currently performs an explicit Catbox upload for the selected clip and saves the returned URL.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.

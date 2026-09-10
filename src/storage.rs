@@ -46,7 +46,7 @@ pub fn clip_path(
         .join(format!("{}.mp4", sanitize_path_component(clip_id)))
 }
 
-pub fn build_placeholder_clip(
+pub fn build_test_clip(
     paths: &LibraryPaths,
     clip_id: &str,
     session_id: &str,
