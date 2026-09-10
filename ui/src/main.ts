@@ -40,6 +40,7 @@ type DesktopStatus = {
   detected_game: string | null;
   replay_buffer_seconds: number;
   mic_enabled: boolean;
+  mic_device: string | null;
   auto_record_enabled: boolean;
   upload_enabled: boolean;
   session_recording: boolean;
@@ -73,6 +74,11 @@ type GsiConfigDto = {
   path: string;
 };
 
+type AudioDeviceDto = {
+  name: string;
+  kind: "input" | "system_loopback";
+};
+
 type AppState = {
   activeView: "Library" | "Recording" | "Auto Clip" | "Uploads" | "Settings";
   recordingState: RecordingState;
@@ -86,6 +92,8 @@ type AppState = {
   systemAudioAvailable: boolean;
   desktopDuplicationAvailable: boolean;
   micEnabled: boolean;
+  micDevice: string;
+  audioDevices: AudioDeviceDto[];
   autoRecordEnabled: boolean;
   autoUpload: boolean;
   uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
@@ -125,6 +133,8 @@ const state: AppState = {
   systemAudioAvailable: false,
   desktopDuplicationAvailable: false,
   micEnabled: false,
+  micDevice: "",
+  audioDevices: [],
   autoRecordEnabled: false,
   autoUpload: false,
   uploadProvider: "catbox",
@@ -390,6 +400,18 @@ function renderRecordingView() {
         <h2>${state.systemAudioAvailable ? "System audio ready" : "System audio unavailable"}</h2>
         <p class="muted">${state.systemAudioAvailable ? "FFmpeg reports WASAPI input support." : "This FFmpeg build does not expose WASAPI; video recording still works."}</p>
         <label class="toggle"><input type="checkbox" ${state.micEnabled ? "checked" : ""} data-action="toggle-mic" /> Mic capture</label>
+        <label>Mic device
+          <select data-action="mic-device">
+            <option value="">Default microphone</option>
+            ${state.audioDevices
+              .filter((device) => device.kind === "input")
+              .map(
+                (device) =>
+                  `<option value="${escapeHtml(device.name)}" ${state.micDevice === device.name ? "selected" : ""}>${escapeHtml(device.name)}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
       </article>
     </section>
   `;
@@ -534,6 +556,11 @@ function bindEvents() {
     void saveMicSetting(state.micEnabled);
   });
 
+  appRoot.querySelector<HTMLSelectElement>("[data-action='mic-device']")?.addEventListener("change", (event) => {
+    state.micDevice = (event.target as HTMLSelectElement).value;
+    void saveMicDevice(state.micDevice);
+  });
+
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-upload']")?.addEventListener("change", (event) => {
     state.autoUpload = (event.target as HTMLInputElement).checked;
     render();
@@ -634,6 +661,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.detectedGame = status.detected_game ?? "Waiting for game";
   state.replayBufferSeconds = status.replay_buffer_seconds;
   state.micEnabled = status.mic_enabled;
+  state.micDevice = status.mic_device ?? "";
   state.autoRecordEnabled = status.auto_record_enabled;
   state.autoUpload = status.upload_enabled;
   state.sessionRecording = status.session_recording;
@@ -778,6 +806,20 @@ async function saveMicSetting(enabled: boolean) {
   }
 }
 
+async function saveMicDevice(device: string) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_mic_device", { device: device || null });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save mic device", error);
+  }
+}
+
 async function saveAutoRecordSetting(enabled: boolean) {
   if (!tauriInvoke) {
     return;
@@ -803,6 +845,19 @@ async function refreshStatus() {
     render();
   } catch (error) {
     console.warn("Could not refresh detected game", error);
+  }
+}
+
+async function refreshAudioDevices() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    state.audioDevices = await tauriInvoke<AudioDeviceDto[]>("list_audio_devices");
+    render();
+  } catch (error) {
+    console.warn("Could not load audio devices", error);
   }
 }
 
@@ -840,6 +895,14 @@ function parseTimestamp(value: string) {
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
 }
 
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 async function loadDesktopBridge() {
   const hasTauri = "__TAURI_INTERNALS__" in window;
   if (!hasTauri) {
@@ -858,6 +921,7 @@ async function loadDesktopBridge() {
     state.clips = clips.map(clipFromDto);
     state.selectedClipId = state.clips[0]?.id ?? "";
     render();
+    await refreshAudioDevices();
     window.setInterval(() => {
       void refreshStatus();
     }, 3_000);

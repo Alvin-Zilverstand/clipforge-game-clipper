@@ -172,13 +172,6 @@ fn collect_files(root: &Path) -> io::Result<Vec<FileFact>> {
     Ok(files)
 }
 
-pub fn write_placeholder_mp4(path: &Path, label: &str) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, format!("ClipForge placeholder video: {label}\n"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,7 +1,7 @@
 use clipforge::game_detection::{default_profiles, detect_game, RunningProcess};
 use clipforge::recorder::{BufferSegment, RecorderAction, RecorderService};
 use clipforge::settings::AppSettings;
-use clipforge::storage::{write_placeholder_mp4, LibraryPaths};
+use clipforge::storage::LibraryPaths;
 use std::env;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -48,11 +48,6 @@ fn main() {
         let clip_action =
             service.save_manual_clip(Duration::from_secs(60), now + Duration::from_secs(60));
         if let Some(RecorderAction::CreatedClip { clip_id, .. }) = clip_action {
-            if let Some(clip) = service.library.all().iter().find(|clip| clip.id == clip_id) {
-                if let Err(error) = write_placeholder_mp4(&clip.path, &clip.id) {
-                    eprintln!("Could not write placeholder clip: {error}");
-                }
-            }
             println!("Created manual clip: {clip_id}");
         }
     } else {

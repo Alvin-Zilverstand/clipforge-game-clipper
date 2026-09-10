@@ -26,6 +26,10 @@ pub struct HotkeySettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacySettings {
     pub mic_enabled: bool,
+    #[serde(default)]
+    pub mic_device: Option<String>,
+    #[serde(default)]
+    pub system_audio_device: Option<String>,
     pub desktop_capture_requires_confirmation: bool,
     pub excluded_window_titles: Vec<String>,
     pub upload_requires_confirmation: bool,
@@ -80,6 +84,8 @@ impl AppSettings {
             },
             privacy: PrivacySettings {
                 mic_enabled: false,
+                mic_device: None,
+                system_audio_device: None,
                 desktop_capture_requires_confirmation: true,
                 excluded_window_titles: Vec::new(),
                 upload_requires_confirmation: true,

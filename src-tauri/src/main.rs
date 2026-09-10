@@ -1,3 +1,4 @@
+use clipforge::audio::{list_ffmpeg_dshow_audio_inputs, AudioDeviceKind};
 use clipforge::capture::{
     ffmpeg_is_available, ffmpeg_supports_filter, ffmpeg_supports_input_device,
     find_ffmpeg_executable, CaptureBackend, CaptureConfig, CaptureMethod, CaptureSource,
@@ -58,6 +59,7 @@ struct DesktopStatus {
     detected_game: Option<String>,
     replay_buffer_seconds: u64,
     mic_enabled: bool,
+    mic_device: Option<String>,
     auto_record_enabled: bool,
     upload_enabled: bool,
     session_recording: bool,
@@ -91,6 +93,12 @@ struct ClipDto {
 struct GsiConfigDto {
     game_id: String,
     path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AudioDeviceDto {
+    name: String,
+    kind: String,
 }
 
 #[tauri::command]
@@ -157,6 +165,35 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     recorder.settings.privacy.mic_enabled = enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn list_audio_devices() -> Result<Vec<AudioDeviceDto>, String> {
+    let ffmpeg = find_ffmpeg_executable()
+        .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
+    Ok(list_ffmpeg_dshow_audio_inputs(&ffmpeg)
+        .into_iter()
+        .map(|device| AudioDeviceDto {
+            name: device.name,
+            kind: match device.kind {
+                AudioDeviceKind::Input => "input".to_string(),
+                AudioDeviceKind::SystemLoopback => "system_loopback".to_string(),
+            },
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn set_mic_device(
+    device: Option<String>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.privacy.mic_device = device.filter(|value| !value.trim().is_empty());
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref()))
@@ -417,8 +454,8 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         encoder: EncoderPreference::HardwareH264,
         system_audio_enabled,
         mic_enabled: recorder.settings.privacy.mic_enabled,
-        system_audio_device: None,
-        mic_device: None,
+        system_audio_device: recorder.settings.privacy.system_audio_device.clone(),
+        mic_device: recorder.settings.privacy.mic_device.clone(),
     };
     let mut backend = FfmpegReplayCaptureBackend::new(ffmpeg, &segment_pattern, segment_duration);
     backend.start(config).map_err(|error| error.to_string())?;
@@ -722,6 +759,8 @@ fn main() {
             list_clips,
             set_replay_buffer,
             set_mic_enabled,
+            list_audio_devices,
+            set_mic_device,
             set_auto_record_enabled,
             write_gsi_configs,
             poll_auto_clip_events,
@@ -842,6 +881,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         detected_game: recorder.state.detected_game_id.clone(),
         replay_buffer_seconds: recorder.settings.replay_buffer.as_secs(),
         mic_enabled: recorder.settings.privacy.mic_enabled,
+        mic_device: recorder.settings.privacy.mic_device.clone(),
         auto_record_enabled: !recorder.settings.privacy.desktop_capture_requires_confirmation,
         upload_enabled: false,
         session_recording: matches!(recorder.state.status, RecordingStatus::RecordingSession),
