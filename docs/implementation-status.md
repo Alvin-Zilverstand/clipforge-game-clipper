@@ -10,7 +10,8 @@
 - Runtime FFmpeg detection checks the bundled sidecar first and then system PATH.
 - Tauri commands exist for status, live game detection, clip listing, manual clip creation, auto-clip polling, Start Capture, Stop Capture, clip delete, reveal in Explorer, trim, upload, and settings updates.
 - Start Capture launches a rolling segmented replay recorder with a low-spec default profile: 720p30 at 6 Mbps using H.264 when available.
-- Video-only recording now prefers native Windows Graphics Capture with Windows Media Foundation H.264; an ignored local smoke test produced real MP4 segments from the desktop.
+- Recording now prefers native Windows Graphics Capture with Windows Media Foundation H.264; it targets detected game windows when possible and falls back to the primary monitor.
+- Native Windows Graphics Capture can now embed native WASAPI system loopback audio and default mic capture; ignored local smoke tests cover standalone loopback, standalone mic, WGC plus loopback, and WGC plus mic.
 - Audio-enabled capture falls back to FFmpeg's Windows Desktop Duplication `ddagrab` filter when available and then `gdigrab`; a local smoke test produced a real MP4 segment with `ddagrab`.
 - Stop Capture asks FFmpeg to finalize gracefully, falls back after a short timeout, concatenates recorded segments, and adds the completed full-session MP4 to the local library.
 - Manual clips now extract from the rolling segment buffer instead of writing placeholder MP4 files.
@@ -26,6 +27,7 @@
 - Event debouncing supports duplicate detection and merge-window behavior.
 - League Live Client Data events are polled from the local Riot endpoint while recording and normalize into shared `GameEvent` records.
 - A localhost Valve GSI receiver on `127.0.0.1:49321` accepts CS2/Dota-style event posts and queues normalized event clips.
+- A backend worker loop now refreshes game detection and drains auto-clip integrations while the desktop app is running, independent of the currently selected UI view.
 - Local clip library can add, filter, remove, update upload state, write a tab-separated manifest, and persist clip metadata in SQLite.
 - Versioned local settings are saved to `settings.json`; replay buffer length and mic toggle are wired from the UI to Rust.
 - Storage layer creates the planned folders, sanitizes clip paths, keeps placeholder helpers for tests/demo paths, and cleans oldest temporary files under a size limit.
@@ -35,18 +37,17 @@
 
 ## Not Fully Working Yet
 
-- Native Windows Graphics Capture is wired for video-only rolling replay capture; game/window targeting and native audio mixing still need more work.
-- WASAPI/system-audio capture is enabled only when the selected FFmpeg build exposes a WASAPI input device; native Rust WASAPI capture/mixing is still pending, so video capture remains enabled while system-audio capture is marked unavailable on FFmpeg builds without WASAPI.
+- Native Windows Graphics Capture is wired for rolling replay capture with native audio; resolution downscaling still needs more work.
+- Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work.
 - Capture has not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
 - Upload provider configuration UI is not complete; Catbox is live from the default Upload action, but Litterbox/custom HTTP need UI selection and configuration.
 - Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen, but richer event mapping per game is still needed.
-- Auto start/stop is conservative: live process detection updates the current game/session state, but capture still starts from explicit user action/hotkey.
+- Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
 
 ## Next Engineering Steps
 
-1. Extend native Windows Graphics Capture from primary-monitor video capture to proper game/window targeting and resolution scaling.
-2. Add native Rust WASAPI capture/mixing.
-3. Add upload provider configuration UI for Litterbox/custom HTTP.
-4. Generate CS2/Dota GSI config files and expand event mapping.
-5. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
-6. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.
+1. Extend native Windows Graphics Capture with resolution downscaling and richer capture-source selection.
+2. Add separate audio tracks and optional per-process loopback capture.
+3. Expand CS2/Dota GSI event mapping beyond the current MVP event parser.
+4. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
+5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.

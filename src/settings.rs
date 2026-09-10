@@ -25,6 +25,8 @@ pub struct HotkeySettings {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivacySettings {
+    #[serde(default = "default_true")]
+    pub system_audio_enabled: bool,
     pub mic_enabled: bool,
     #[serde(default)]
     pub mic_device: Option<String>,
@@ -83,6 +85,7 @@ impl AppSettings {
                 screenshot: "F9".to_string(),
             },
             privacy: PrivacySettings {
+                system_audio_enabled: true,
                 mic_enabled: false,
                 mic_device: None,
                 system_audio_device: None,
@@ -132,6 +135,10 @@ pub fn save_settings(root: impl Into<PathBuf>, settings: &AppSettings) -> io::Re
 
 pub fn settings_path(root: impl Into<PathBuf>) -> PathBuf {
     root.into().join("settings.json")
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[cfg(test)]

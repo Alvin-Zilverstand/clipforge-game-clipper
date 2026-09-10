@@ -17,6 +17,10 @@ use clipforge::media::{
     trim_clip as ffmpeg_trim_clip,
 };
 use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
+use clipforge::native_audio::{
+    list_native_audio_devices, native_microphone_available, native_system_loopback_available,
+    NativeAudioSource,
+};
 use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings};
@@ -79,6 +83,7 @@ struct DesktopStatus {
     recording_state: String,
     detected_game: Option<String>,
     replay_buffer_seconds: u64,
+    system_audio_enabled: bool,
     mic_enabled: bool,
     mic_device: Option<String>,
     auto_record_enabled: bool,
@@ -132,8 +137,13 @@ fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
 
 #[tauri::command]
 fn refresh_detected_game(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    refresh_detected_game_inner(runtime.inner())
+}
+
+fn refresh_detected_game_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let detected = detect_game(&running_processes(), &default_profiles());
     let mut should_auto_start = false;
+    let mut should_auto_stop = false;
 
     {
         let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
@@ -154,15 +164,23 @@ fn refresh_detected_game(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus
             None if capture.is_none() => {
                 let _ = recorder.stop();
             }
-            None => {}
+            None => {
+                should_auto_stop = recorder.state.detected_game_id.as_deref() != Some("desktop");
+            }
         }
 
         if !should_auto_start {
-            return Ok(status_from_recorder(&recorder, capture.as_ref()));
+            if !should_auto_stop {
+                return Ok(status_from_recorder(&recorder, capture.as_ref()));
+            }
         }
     }
 
-    start_capture_inner(runtime.inner())
+    if should_auto_stop {
+        stop_capture_inner(runtime)
+    } else {
+        start_capture_inner(runtime)
+    }
 }
 
 #[tauri::command]
@@ -193,19 +211,49 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
 }
 
 #[tauri::command]
+fn set_system_audio_enabled(
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.privacy.system_audio_enabled = enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
 fn list_audio_devices() -> Result<Vec<AudioDeviceDto>, String> {
-    let ffmpeg = find_ffmpeg_executable()
-        .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
-    Ok(list_ffmpeg_dshow_audio_inputs(&ffmpeg)
+    let mut devices = list_native_audio_devices()
         .into_iter()
         .map(|device| AudioDeviceDto {
             name: device.name,
-            kind: match device.kind {
-                AudioDeviceKind::Input => "input".to_string(),
-                AudioDeviceKind::SystemLoopback => "system_loopback".to_string(),
+            kind: match device.source {
+                NativeAudioSource::Microphone => "input".to_string(),
+                NativeAudioSource::SystemLoopback => "system_loopback".to_string(),
             },
         })
-        .collect())
+        .collect::<Vec<_>>();
+
+    if let Some(ffmpeg) = find_ffmpeg_executable() {
+        for device in list_ffmpeg_dshow_audio_inputs(&ffmpeg) {
+            if !devices
+                .iter()
+                .any(|existing| existing.name == device.name && existing.kind == "input")
+            {
+                devices.push(AudioDeviceDto {
+                    name: device.name,
+                    kind: match device.kind {
+                        AudioDeviceKind::Input => "input".to_string(),
+                        AudioDeviceKind::SystemLoopback => "system_loopback".to_string(),
+                    },
+                });
+            }
+        }
+    }
+
+    Ok(devices)
 }
 
 #[tauri::command]
@@ -251,6 +299,10 @@ fn write_gsi_configs(runtime: State<'_, AppRuntime>) -> Result<Vec<GsiConfigDto>
 
 #[tauri::command]
 fn poll_auto_clip_events(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>, String> {
+    poll_auto_clip_events_inner(runtime.inner())
+}
+
+fn poll_auto_clip_events_inner(runtime: &AppRuntime) -> Result<Vec<ClipDto>, String> {
     let (session_id, game_id, session_started_at) = {
         let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
         let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
@@ -282,8 +334,8 @@ fn poll_auto_clip_events(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>,
 
         let integration = LeagueIntegration;
         for raw_event in raw_events {
-            if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
-                if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
+                if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
+                if let Some(clip) = handle_auto_event_inner(event, runtime)? {
                     created.push(clip);
                 }
             }
@@ -305,7 +357,7 @@ fn poll_auto_clip_events(runtime: State<'_, AppRuntime>) -> Result<Vec<ClipDto>,
         };
         for raw_event in raw_events {
             if let Some(event) = integration.normalize_event(&raw_event, &session_id) {
-                if let Some(clip) = handle_auto_event_inner(event, runtime.inner())? {
+                if let Some(clip) = handle_auto_event_inner(event, runtime)? {
                     created.push(clip);
                 }
             }
@@ -443,7 +495,14 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
     let now = SystemTime::now();
     if recorder.state.active_session_id.is_none() {
-        recorder.start_for_game("desktop", now);
+        let detected = detect_game(&running_processes(), &default_profiles());
+        recorder.start_for_game(
+            detected
+                .as_ref()
+                .map(|game| game.game_id.as_str())
+                .unwrap_or("desktop"),
+            now,
+        );
     }
     recorder.toggle_session_recording();
 
@@ -460,14 +519,27 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let segment_duration = Duration::from_secs(5);
     let segment_pattern = buffer_dir.join("segment-%05d.mp4");
 
-    let system_audio_enabled = ffmpeg_supports_input_device(&ffmpeg, "wasapi");
+    let native_system_audio_available = native_system_loopback_available();
+    let native_mic_available = native_microphone_available();
+    let ffmpeg_system_audio_available = ffmpeg_supports_input_device(&ffmpeg, "wasapi");
+    let system_audio_enabled = recorder.settings.privacy.system_audio_enabled
+        && (native_system_audio_available || ffmpeg_system_audio_available);
     let method = if ffmpeg_supports_filter(&ffmpeg, "ddagrab") {
         CaptureMethod::DesktopDuplication
     } else {
         CaptureMethod::GdiGrab
     };
+    let source = detect_game(&running_processes(), &default_profiles())
+        .map(|game| CaptureSource::GameWindow {
+            process_name: game.process.process_name,
+            window_title: game
+                .process
+                .window_title
+                .unwrap_or(game.display_name),
+        })
+        .unwrap_or(CaptureSource::Desktop);
     let config = CaptureConfig {
-        source: CaptureSource::Desktop,
+        source,
         method,
         width: recorder.settings.quality.width,
         height: recorder.settings.quality.height,
@@ -484,7 +556,9 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         &segment_pattern,
         segment_duration,
         config,
-        system_audio_enabled || recorder.settings.privacy.mic_enabled,
+        native_system_audio_available,
+        native_mic_available,
+        ffmpeg_system_audio_available,
     )?;
     *capture = Some(ActiveCapture {
         buffer_dir,
@@ -735,6 +809,7 @@ fn main() {
         })
         .setup(|app| {
             start_valve_gsi_receiver(app.handle().clone());
+            start_backend_workers(app.handle().clone());
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::{
@@ -786,6 +861,7 @@ fn main() {
             list_clips,
             set_replay_buffer,
             set_mic_enabled,
+            set_system_audio_enabled,
             list_audio_devices,
             set_mic_device,
             set_auto_record_enabled,
@@ -877,9 +953,13 @@ fn start_best_capture_backend(
     segment_pattern: &std::path::Path,
     segment_duration: Duration,
     config: CaptureConfig,
-    needs_ffmpeg_audio: bool,
+    native_system_audio_available: bool,
+    native_mic_available: bool,
+    ffmpeg_system_audio_available: bool,
 ) -> Result<ActiveCaptureBackend, String> {
-    if !needs_ffmpeg_audio {
+    if (!config.system_audio_enabled || native_system_audio_available)
+        && (!config.mic_enabled || native_mic_available)
+    {
         let mut native = NativeWgcReplayCaptureBackend::new(segment_pattern, segment_duration);
         if native.start(config.clone()).is_ok() {
             return Ok(ActiveCaptureBackend::NativeWgc(native));
@@ -887,8 +967,12 @@ fn start_best_capture_backend(
     }
 
     let mut ffmpeg_backend = FfmpegReplayCaptureBackend::new(ffmpeg, segment_pattern, segment_duration);
+    let mut ffmpeg_config = config;
+    if ffmpeg_config.system_audio_enabled && !ffmpeg_system_audio_available {
+        ffmpeg_config.system_audio_enabled = false;
+    }
     ffmpeg_backend
-        .start(config)
+        .start(ffmpeg_config)
         .map_err(|error| error.to_string())?;
     Ok(ActiveCaptureBackend::Ffmpeg(ffmpeg_backend))
 }
@@ -923,11 +1007,24 @@ fn start_valve_gsi_receiver(app: tauri::AppHandle) {
     });
 }
 
+fn start_backend_workers(app: tauri::AppHandle) {
+    thread::Builder::new()
+        .name("clipforge-backend-workers".to_string())
+        .spawn(move || loop {
+            let runtime = app.state::<AppRuntime>();
+            let _ = refresh_detected_game_inner(runtime.inner());
+            let _ = poll_auto_clip_events_inner(runtime.inner());
+            thread::sleep(Duration::from_secs(2));
+        })
+        .expect("could not start ClipForge backend workers");
+}
+
 fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
     DesktopStatus {
         recording_state: recording_status_name(&recorder.state.status).to_string(),
         detected_game: recorder.state.detected_game_id.clone(),
         replay_buffer_seconds: recorder.settings.replay_buffer.as_secs(),
+        system_audio_enabled: recorder.settings.privacy.system_audio_enabled,
         mic_enabled: recorder.settings.privacy.mic_enabled,
         mic_device: recorder.settings.privacy.mic_device.clone(),
         auto_record_enabled: !recorder.settings.privacy.desktop_capture_requires_confirmation,
@@ -940,7 +1037,8 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         library_root: recorder.paths.clip_root.display().to_string(),
         ffmpeg_available: ffmpeg_is_available(),
         ffmpeg_path: find_ffmpeg_executable().map(|path| path.display().to_string()),
-        system_audio_available: find_ffmpeg_executable()
+        system_audio_available: native_system_loopback_available()
+            || find_ffmpeg_executable()
             .map(|path| ffmpeg_supports_input_device(&path, "wasapi"))
             .unwrap_or(false),
         desktop_duplication_available: find_ffmpeg_executable()

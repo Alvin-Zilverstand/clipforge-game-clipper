@@ -39,6 +39,7 @@ type DesktopStatus = {
   recording_state: RecordingState;
   detected_game: string | null;
   replay_buffer_seconds: number;
+  system_audio_enabled: boolean;
   mic_enabled: boolean;
   mic_device: string | null;
   auto_record_enabled: boolean;
@@ -85,6 +86,7 @@ type AppState = {
   recordingState: RecordingState;
   detectedGame: string;
   replayBufferSeconds: number;
+  systemAudioEnabled: boolean;
   sessionRecording: boolean;
   captureActive: boolean;
   captureBackend: string | null;
@@ -127,6 +129,7 @@ const state: AppState = {
   recordingState: "Buffering",
   detectedGame: "Counter-Strike 2",
   replayBufferSeconds: 60,
+  systemAudioEnabled: true,
   sessionRecording: false,
   captureActive: false,
   captureBackend: null,
@@ -402,7 +405,8 @@ function renderRecordingView() {
       <article class="settings-panel">
         <p class="eyebrow">Audio</p>
         <h2>${state.systemAudioAvailable ? "System audio ready" : "System audio unavailable"}</h2>
-        <p class="muted">${state.systemAudioAvailable ? "FFmpeg reports WASAPI input support." : "This FFmpeg build does not expose WASAPI; video recording still works."}</p>
+        <p class="muted">${state.systemAudioAvailable ? "Native WASAPI or FFmpeg audio capture is available." : "No system loopback device is available; video recording still works."}</p>
+        <label class="toggle"><input type="checkbox" ${state.systemAudioEnabled ? "checked" : ""} data-action="toggle-system-audio" /> System audio</label>
         <label class="toggle"><input type="checkbox" ${state.micEnabled ? "checked" : ""} data-action="toggle-mic" /> Mic capture</label>
         <label>Mic device
           <select data-action="mic-device">
@@ -560,6 +564,12 @@ function bindEvents() {
     void saveMicSetting(state.micEnabled);
   });
 
+  appRoot.querySelector<HTMLInputElement>("[data-action='toggle-system-audio']")?.addEventListener("change", (event) => {
+    state.systemAudioEnabled = (event.target as HTMLInputElement).checked;
+    render();
+    void saveSystemAudioSetting(state.systemAudioEnabled);
+  });
+
   appRoot.querySelector<HTMLSelectElement>("[data-action='mic-device']")?.addEventListener("change", (event) => {
     state.micDevice = (event.target as HTMLSelectElement).value;
     void saveMicDevice(state.micDevice);
@@ -664,6 +674,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.recordingState = status.recording_state;
   state.detectedGame = status.detected_game ?? "Waiting for game";
   state.replayBufferSeconds = status.replay_buffer_seconds;
+  state.systemAudioEnabled = status.system_audio_enabled;
   state.micEnabled = status.mic_enabled;
   state.micDevice = status.mic_device ?? "";
   state.autoRecordEnabled = status.auto_record_enabled;
@@ -808,6 +819,20 @@ async function saveMicSetting(enabled: boolean) {
     render();
   } catch (error) {
     console.warn("Could not save mic setting", error);
+  }
+}
+
+async function saveSystemAudioSetting(enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_system_audio_enabled", { enabled });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save system audio setting", error);
   }
 }
 
