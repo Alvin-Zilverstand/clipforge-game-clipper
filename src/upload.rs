@@ -300,6 +300,10 @@ fn extract_json_path(body: &str, path: &str) -> Result<String, UploadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn litterbox_rejects_invalid_expiry() {
@@ -324,5 +328,106 @@ mod tests {
         )
         .expect("url");
         assert_eq!(url, "https://example.test/c.mp4");
+    }
+
+    #[test]
+    fn custom_http_uploader_sends_multipart_file() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local upload test");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("local upload address")
+        );
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept upload request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set upload read timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        request.extend_from_slice(&buffer[..read]);
+                        if request_body_is_complete(&request) {
+                            break;
+                        }
+                    }
+                    Err(error)
+                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("read upload request: {error}"),
+                }
+            }
+            let request_text = String::from_utf8_lossy(&request);
+            assert!(request_text.contains("POST / HTTP/1.1"));
+            assert!(request_text.contains("multipart/form-data"));
+            assert!(request_text.contains("clip_id"));
+            assert!(request_text.contains("clipforge-bytes"));
+            let body = r#"{"data":{"url":"https://uploads.example.test/clip.mp4"}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write upload response");
+        });
+
+        let file_path = std::env::temp_dir().join(format!(
+            "clipforge-upload-{}.txt",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::write(&file_path, b"clipforge-bytes").expect("write upload test file");
+        let uploader = CustomHttpUploader {
+            endpoint,
+            method: "POST".to_string(),
+            multipart_field: "file".to_string(),
+            response_url_path: "data.url".to_string(),
+            headers: Vec::new(),
+        };
+
+        let result = uploader
+            .upload(
+                &file_path,
+                &UploadMetadata {
+                    clip_id: "clip".to_string(),
+                    game_id: "game".to_string(),
+                    title: "Clip".to_string(),
+                },
+            )
+            .expect("custom HTTP upload result");
+
+        assert_eq!(result.url, "https://uploads.example.test/clip.mp4");
+        server.join().expect("upload test server");
+        let _ = std::fs::remove_file(file_path);
+    }
+
+    fn request_body_is_complete(request: &[u8]) -> bool {
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        content_length
+            .map(|length| request.len() >= header_end + 4 + length)
+            .unwrap_or_else(|| {
+                request
+                    .windows(17)
+                    .any(|window| window == b"clipforge-bytes")
+            })
     }
 }
