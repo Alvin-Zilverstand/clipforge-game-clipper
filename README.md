@@ -44,3 +44,9 @@ The verified build outputs are:
 - `src-tauri/target/release/bundle/msi/ClipForge_0.1.0_x64_en-US.msi`
 - `src-tauri/target/release/bundle/nsis/ClipForge_0.1.0_x64-setup.exe`
 
+The NSIS setup EXE installs for the current Windows user by default and creates the normal Windows uninstaller entry/file during installation. The MSI can also be removed through Windows Apps/Programs and Features.
+
+## GitHub Releases
+
+GitHub Actions builds Windows installer artifacts on pushes to `master`/`main`, pull requests, and manual runs. Any pushed file change, including newly added files, triggers a build. Pushing a tag like `v0.1.0` also publishes the MSI and setup EXE to a GitHub Release.
+

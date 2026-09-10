@@ -2,6 +2,7 @@
   "name": "clipforge",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.19.0",
   "type": "module",
   "description": "Windows-first local game clipping app with replay buffer and event auto-clipping.",
   "scripts": {
