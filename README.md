@@ -6,14 +6,14 @@ ClipForge is a Windows-first, local-first game clipping app inspired by tools li
 
 - Rolling replay capture writes short MP4 segments and manual clips extract from those segments.
 - Full-session recording concatenates the session segments into a saved MP4.
-- Capture prefers FFmpeg Desktop Duplication (`ddagrab`) when available and falls back to `gdigrab`.
+- Video-only capture prefers native Windows Graphics Capture with H.264, then falls back to FFmpeg Desktop Duplication (`ddagrab`) or `gdigrab`.
 - FFmpeg Media Foundation H.264 is used when available.
 - FFmpeg is bundled as a Tauri sidecar for installer builds, so users do not need a separate FFmpeg install.
 - SQLite stores the clip library; `settings.json` stores versioned local settings.
 - Global hotkeys are registered while the app runs: `F8`, `Shift+F8`, and `Alt+F7`.
 - League Live Client events and Valve GSI-style events feed the auto-clip pipeline.
 - Catbox, Litterbox, and custom multipart HTTP upload adapters are implemented; the UI can choose providers.
-- Native Windows Graphics Capture and native Rust WASAPI mixing are still future work.
+- Native Rust WASAPI mixing is still future work; audio-enabled recording currently uses the FFmpeg path.
 
 ## Commands
 

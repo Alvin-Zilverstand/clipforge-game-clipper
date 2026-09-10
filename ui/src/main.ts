@@ -45,6 +45,7 @@ type DesktopStatus = {
   upload_enabled: boolean;
   session_recording: boolean;
   capture_active: boolean;
+  capture_backend: string | null;
   capture_path: string | null;
   clip_count: number;
   library_root: string;
@@ -86,6 +87,7 @@ type AppState = {
   replayBufferSeconds: number;
   sessionRecording: boolean;
   captureActive: boolean;
+  captureBackend: string | null;
   capturePath: string | null;
   ffmpegAvailable: boolean;
   ffmpegPath: string | null;
@@ -127,6 +129,7 @@ const state: AppState = {
   replayBufferSeconds: 60,
   sessionRecording: false,
   captureActive: false,
+  captureBackend: null,
   capturePath: null,
   ffmpegAvailable: false,
   ffmpegPath: null,
@@ -392,6 +395,7 @@ function renderRecordingView() {
         <h2>720p30 Performance</h2>
         <p class="muted">Lightweight desktop capture uses bundled FFmpeg when system FFmpeg is missing.</p>
         <p class="muted">${state.desktopDuplicationAvailable ? "Desktop Duplication capture available" : "Using GDI capture fallback"}</p>
+        <p class="muted">${state.captureBackend ? `Active backend: ${state.captureBackend}` : "Active backend: idle"}</p>
         <p class="muted">${state.ffmpegAvailable ? "FFmpeg ready" : "FFmpeg missing"}${state.ffmpegPath ? ` · ${state.ffmpegPath}` : ""}</p>
         <p class="muted">${state.capturePath ? `Writing ${state.capturePath}` : "No active capture file"}</p>
       </article>
@@ -666,6 +670,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.autoUpload = status.upload_enabled;
   state.sessionRecording = status.session_recording;
   state.captureActive = status.capture_active;
+  state.captureBackend = status.capture_backend;
   state.capturePath = status.capture_path;
   state.ffmpegAvailable = status.ffmpeg_available;
   state.ffmpegPath = status.ffmpeg_path;

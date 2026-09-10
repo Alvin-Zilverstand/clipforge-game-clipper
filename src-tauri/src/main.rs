@@ -17,6 +17,7 @@ use clipforge::media::{
     trim_clip as ffmpeg_trim_clip,
 };
 use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
+use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings};
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
@@ -44,13 +45,33 @@ struct AppRuntime {
     valve_events: Mutex<Vec<RawGameEvent>>,
 }
 
-#[derive(Debug)]
 struct ActiveCapture {
     buffer_dir: PathBuf,
     session_output_path: PathBuf,
     segment_duration: Duration,
     started_at: SystemTime,
-    backend: FfmpegReplayCaptureBackend,
+    backend: ActiveCaptureBackend,
+}
+
+enum ActiveCaptureBackend {
+    Ffmpeg(FfmpegReplayCaptureBackend),
+    NativeWgc(NativeWgcReplayCaptureBackend),
+}
+
+impl ActiveCaptureBackend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Ffmpeg(backend) => backend.name(),
+            Self::NativeWgc(backend) => backend.name(),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), clipforge::capture::CaptureError> {
+        match self {
+            Self::Ffmpeg(backend) => backend.stop(),
+            Self::NativeWgc(backend) => backend.stop(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -64,6 +85,7 @@ struct DesktopStatus {
     upload_enabled: bool,
     session_recording: bool,
     capture_active: bool,
+    capture_backend: Option<String>,
     capture_path: Option<String>,
     clip_count: usize,
     library_root: String,
@@ -457,8 +479,13 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         system_audio_device: recorder.settings.privacy.system_audio_device.clone(),
         mic_device: recorder.settings.privacy.mic_device.clone(),
     };
-    let mut backend = FfmpegReplayCaptureBackend::new(ffmpeg, &segment_pattern, segment_duration);
-    backend.start(config).map_err(|error| error.to_string())?;
+    let backend = start_best_capture_backend(
+        &ffmpeg,
+        &segment_pattern,
+        segment_duration,
+        config,
+        system_audio_enabled || recorder.settings.privacy.mic_enabled,
+    )?;
     *capture = Some(ActiveCapture {
         buffer_dir,
         session_output_path,
@@ -845,6 +872,27 @@ fn add_session_clip(
     Ok(clip)
 }
 
+fn start_best_capture_backend(
+    ffmpeg: &std::path::Path,
+    segment_pattern: &std::path::Path,
+    segment_duration: Duration,
+    config: CaptureConfig,
+    needs_ffmpeg_audio: bool,
+) -> Result<ActiveCaptureBackend, String> {
+    if !needs_ffmpeg_audio {
+        let mut native = NativeWgcReplayCaptureBackend::new(segment_pattern, segment_duration);
+        if native.start(config.clone()).is_ok() {
+            return Ok(ActiveCaptureBackend::NativeWgc(native));
+        }
+    }
+
+    let mut ffmpeg_backend = FfmpegReplayCaptureBackend::new(ffmpeg, segment_pattern, segment_duration);
+    ffmpeg_backend
+        .start(config)
+        .map_err(|error| error.to_string())?;
+    Ok(ActiveCaptureBackend::Ffmpeg(ffmpeg_backend))
+}
+
 fn start_valve_gsi_receiver(app: tauri::AppHandle) {
     thread::spawn(move || {
         let Ok(listener) = TcpListener::bind("127.0.0.1:49321") else {
@@ -886,6 +934,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         upload_enabled: false,
         session_recording: matches!(recorder.state.status, RecordingStatus::RecordingSession),
         capture_active: capture.is_some(),
+        capture_backend: capture.map(|active| active.backend.name().to_string()),
         capture_path: capture.map(|active| active.session_output_path.display().to_string()),
         clip_count: recorder.library.all().len(),
         library_root: recorder.paths.clip_root.display().to_string(),
