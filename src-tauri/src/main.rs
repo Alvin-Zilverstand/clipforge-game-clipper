@@ -1075,8 +1075,14 @@ fn parse_header_lines(value: &str) -> Vec<(String, String)> {
 fn default_auto_clip_events_for_game(game_id: &str) -> Vec<&'static str> {
     match game_id {
         "league-of-legends" => vec!["kill", "death", "assist", "objective", "match_win"],
-        "counter-strike-2" => vec!["kill", "death", "assist", "round_win", "match_win", "multi_kill"],
-        "dota-2" => vec!["kill", "death", "assist", "objective", "match_win", "multi_kill"],
+        "counter-strike-2" => vec![
+            "kill", "death", "assist", "round_win", "match_win", "multi_kill",
+            "bomb_planted", "bomb_defused", "bomb_exploded", "mvp"
+        ],
+        "dota-2" => vec![
+            "kill", "death", "assist", "objective", "match_win", "multi_kill",
+            "mvp"
+        ],
         _ => Vec::new(),
     }
 }

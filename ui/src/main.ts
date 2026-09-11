@@ -192,13 +192,20 @@ const state: AppState = {
     { id: "cs2-death", gameId: "counter-strike-2", eventType: "death", game: "Counter-Strike 2", event: "Death", enabled: true },
     { id: "cs2-round", gameId: "counter-strike-2", eventType: "round_win", game: "Counter-Strike 2", event: "Round win", enabled: true },
     { id: "cs2-multi", gameId: "counter-strike-2", eventType: "multi_kill", game: "Counter-Strike 2", event: "Multi-kill", enabled: true },
+    { id: "cs2-bomb-planted", gameId: "counter-strike-2", eventType: "bomb_planted", game: "Counter-Strike 2", event: "Bomb planted", enabled: true },
+    { id: "cs2-bomb-defused", gameId: "counter-strike-2", eventType: "bomb_defused", game: "Counter-Strike 2", event: "Bomb defused", enabled: true },
+    { id: "cs2-bomb-exploded", gameId: "counter-strike-2", eventType: "bomb_exploded", game: "Counter-Strike 2", event: "Bomb exploded", enabled: true },
+    { id: "cs2-mvp", gameId: "counter-strike-2", eventType: "mvp", game: "Counter-Strike 2", event: "MVP", enabled: true },
     { id: "lol-kill", gameId: "league-of-legends", eventType: "kill", game: "League of Legends", event: "Champion kill", enabled: true },
     { id: "lol-death", gameId: "league-of-legends", eventType: "death", game: "League of Legends", event: "Death", enabled: true },
     { id: "lol-assist", gameId: "league-of-legends", eventType: "assist", game: "League of Legends", event: "Assist", enabled: true },
     { id: "lol-objective", gameId: "league-of-legends", eventType: "objective", game: "League of Legends", event: "Objective", enabled: true },
     { id: "dota-kill", gameId: "dota-2", eventType: "kill", game: "Dota 2", event: "Kill", enabled: true },
+    { id: "dota-death", gameId: "dota-2", eventType: "death", game: "Dota 2", event: "Death", enabled: true },
+    { id: "dota-assist", gameId: "dota-2", eventType: "assist", game: "Dota 2", event: "Assist", enabled: true },
     { id: "dota-objective", gameId: "dota-2", eventType: "objective", game: "Dota 2", event: "Roshan/objective", enabled: true },
     { id: "dota-multi", gameId: "dota-2", eventType: "multi_kill", game: "Dota 2", event: "Multi-kill", enabled: true },
+    { id: "dota-mvp", gameId: "dota-2", eventType: "mvp", game: "Dota 2", event: "MVP", enabled: true },
   ],
   hotkeyClipLast60s: "F8",
   hotkeyClipLast30s: "Shift+F8",
@@ -364,12 +371,15 @@ function renderClipDetails(clip: Clip | undefined) {
     `;
   }
 
+  const durationSeconds = parseTimestamp(clip.duration);
+  const durationDisplay = formatDuration(durationSeconds);
+
   return `
     <aside class="detail-panel">
       <div class="preview">
         ${
           clip.videoUrl
-            ? `<video controls preload="metadata" src="${clip.videoUrl}" poster="${clip.thumbnailUrl ?? ""}"></video>`
+            ? `<video controls preload="metadata" src="${clip.videoUrl}" poster="${clip.thumbnailUrl ?? ""}" id="clip-preview"></video>`
             : `<span>Preview</span>`
         }
       </div>
@@ -378,9 +388,23 @@ function renderClipDetails(clip: Clip | undefined) {
       <label>Tags <input value="${escapeHtml(clip.tags.join(", "))}" data-action="clip-tags" /></label>
       <div class="tag-row">${clip.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>
       <p class="muted file-path">${escapeHtml(clip.path || "Clip file unavailable")}</p>
-      <div class="trim-row">
-        <label>Start <input value="00:00" data-action="trim-start" /></label>
-        <label>End <input value="${escapeHtml(clip.duration)}" data-action="trim-end" /></label>
+      <div class="trim-section">
+        <h4>Trim</h4>
+        <div class="timeline-container">
+          <div class="timeline-track" data-action="timeline-track" role="slider" aria-label="Trim timeline" tabindex="0">
+            <div class="timeline-fill" id="timeline-fill"></div>
+            <div class="timeline-handle" id="timeline-handle-start" data-handle="start" role="slider" aria-label="Trim start" tabindex="0"></div>
+            <div class="timeline-handle" id="timeline-handle-end" data-handle="end" role="slider" aria-label="Trim end" tabindex="0"></div>
+          </div>
+          <div class="timeline-labels">
+            <span id="timeline-label-start">00:00</span>
+            <span id="timeline-label-end">${escapeHtml(durationDisplay)}</span>
+          </div>
+        </div>
+        <div class="trim-row">
+          <label>Start <input value="00:00" data-action="trim-start" /></label>
+          <label>End <input value="${escapeHtml(durationDisplay)}" data-action="trim-end" /></label>
+        </div>
       </div>
       <div class="actions">
         <button data-action="save-metadata">Save Info</button>
@@ -714,6 +738,159 @@ function bindEvents() {
   appRoot.querySelector<HTMLButtonElement>("[data-action='save-hotkeys']")?.addEventListener("click", () => {
     void saveHotkeys();
   });
+
+  // Timeline drag handlers
+  const timelineTrack = appRoot.querySelector<HTMLElement>("[data-action='timeline-track']");
+  const handleStart = appRoot.querySelector<HTMLElement>("#timeline-handle-start");
+  const handleEnd = appRoot.querySelector<HTMLElement>("#timeline-handle-end");
+
+  if (timelineTrack && handleStart && handleEnd) {
+    let draggingHandle: "start" | "end" | null = null;
+    const clip = state.clips.find((c) => c.id === state.selectedClipId);
+    const clipDuration = clip ? parseTimestamp(clip.duration) : 0;
+
+    const updateHandlePositions = () => {
+      const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-start']");
+      const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-end']");
+      const startLabel = appRoot.querySelector<HTMLElement>("#timeline-label-start");
+      const endLabel = appRoot.querySelector<HTMLElement>("#timeline-label-end");
+      const fill = appRoot.querySelector<HTMLElement>("#timeline-fill");
+
+      if (startInput && endInput && clipDuration > 0) {
+        const startPercent = (parseTimestamp(startInput.value) / clipDuration) * 100;
+        const endPercent = (parseTimestamp(endInput.value) / clipDuration) * 100;
+        
+        handleStart.style.left = `${Math.max(0, Math.min(100, startPercent))}%`;
+        handleEnd.style.left = `${Math.max(0, Math.min(100, endPercent))}%`;
+        
+        if (fill) {
+          fill.style.left = `${startPercent}%`;
+          fill.style.width = `${Math.max(0, endPercent - startPercent)}%`;
+        }
+        
+        if (startLabel) startLabel.textContent = formatDuration(parseTimestamp(startInput.value));
+        if (endLabel) endLabel.textContent = formatDuration(parseTimestamp(endInput.value));
+      }
+    };
+
+    const startDrag = (handle: "start" | "end", clientX: number) => {
+      draggingHandle = handle;
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!draggingHandle || clipDuration <= 0) return;
+      
+      const rect = timelineTrack.getBoundingClientRect();
+      const percent = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
+      const seconds = (percent / 100) * clipDuration;
+      
+      const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-start']");
+      const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-end']");
+      
+      if (draggingHandle === "start" && startInput && endInput) {
+        const newStart = Math.min(seconds, parseTimestamp(endInput.value) - 1);
+        startInput.value = formatDuration(Math.max(0, newStart));
+      } else if (draggingHandle === "end" && startInput && endInput) {
+        const newEnd = Math.max(seconds, parseTimestamp(startInput.value) + 1);
+        endInput.value = formatDuration(Math.min(clipDuration, newEnd));
+      }
+      
+      updateHandlePositions();
+    };
+
+    const onMouseUp = () => {
+      if (draggingHandle) {
+        draggingHandle = null;
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      }
+    };
+
+    handleStart.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+      startDrag("start", e.clientX);
+    });
+    
+    handleEnd.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+      startDrag("end", e.clientX);
+    });
+
+    timelineTrack.addEventListener("mousedown", (e) => {
+      const rect = timelineTrack.getBoundingClientRect();
+      const percent = ((e.clientX - rect.left) / rect.width) * 100;
+      const seconds = (percent / 100) * clipDuration;
+      
+      const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-start']");
+      const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-end']");
+      
+      if (startInput && endInput) {
+        const startVal = parseTimestamp(startInput.value);
+        const endVal = parseTimestamp(endInput.value);
+        const midPoint = (startVal + endVal) / 2;
+        
+        if (seconds < midPoint) {
+          startInput.value = formatDuration(Math.max(0, seconds));
+        } else {
+          endInput.value = formatDuration(Math.min(clipDuration, seconds));
+        }
+        updateHandlePositions();
+      }
+    });
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+
+    // Keyboard support for handles
+    [handleStart, handleEnd].forEach((handle, idx) => {
+      handle.addEventListener("keydown", (e) => {
+        const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-start']");
+        const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-end']");
+        if (!startInput || !endInput) return;
+        
+        const step = 5; // 5 seconds
+        let changed = false;
+        
+        if (e.key === "ArrowRight") {
+          if (idx === 0) { // start handle
+            const newVal = Math.min(parseTimestamp(startInput.value) + step, parseTimestamp(endInput.value) - 1);
+            startInput.value = formatDuration(newVal);
+            changed = true;
+          } else { // end handle
+            const newVal = Math.min(parseTimestamp(endInput.value) + step, clipDuration);
+            endInput.value = formatDuration(newVal);
+            changed = true;
+          }
+        } else if (e.key === "ArrowLeft") {
+          if (idx === 0) { // start handle
+            const newVal = Math.max(parseTimestamp(startInput.value) - step, 0);
+            startInput.value = formatDuration(newVal);
+            changed = true;
+          } else { // end handle
+            const newVal = Math.max(parseTimestamp(endInput.value) - step, parseTimestamp(startInput.value) + 1);
+            endInput.value = formatDuration(newVal);
+            changed = true;
+          }
+        }
+        
+        if (changed) {
+          e.preventDefault();
+          updateHandlePositions();
+        }
+      });
+    });
+
+    // Sync input changes to timeline
+    const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-start']");
+    const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='trim-end']");
+    if (startInput) startInput.addEventListener("input", updateHandlePositions);
+    if (endInput) endInput.addEventListener("input", updateHandlePositions);
+    
+    // Initial update
+    updateHandlePositions();
+  }
 }
 
 async function saveClip() {
@@ -1204,6 +1381,16 @@ function parseTimestamp(value: string) {
     return parts[0] * 60 + parts[1];
   }
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+function formatDuration(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  if (hrs > 0) {
+    return `${hrs}:${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+  }
+  return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
 function escapeHtml(value: string) {

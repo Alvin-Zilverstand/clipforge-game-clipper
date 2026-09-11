@@ -156,16 +156,24 @@ impl GameIntegration for ValveGsiIntegration {
 
     fn normalize_event(&self, raw: &RawGameEvent, session_id: &str) -> Option<GameEvent> {
         let lower = raw.name.to_lowercase();
-        let event_type = if lower.contains("kill") {
+        let event_type = if lower.contains("kill") && !lower.contains("multi") && !lower.contains("mvp") {
             GameEventType::Kill
         } else if lower.contains("death") {
             GameEventType::Death
         } else if lower.contains("assist") {
             GameEventType::Assist
-        } else if lower.contains("round") && lower.contains("win") {
+        } else if lower.contains("multi_kill") || lower.contains("double_kill") || lower.contains("triple_kill")
+            || lower.contains("quad_kill") || lower.contains("penta_kill")
+        {
+            GameEventType::MultiKill
+        } else if lower.contains("round_win") || lower.contains("round_start") {
             GameEventType::RoundWin
-        } else if lower.contains("match") && lower.contains("win") {
+        } else if lower.contains("match_end") {
             GameEventType::MatchWin
+        } else if lower.contains("bomb") {
+            GameEventType::Objective
+        } else if lower.contains("mvp") {
+            GameEventType::MultiKill
         } else if lower.contains("objective") || lower.contains("aegis") || lower.contains("roshan")
         {
             GameEventType::Objective
@@ -185,37 +193,200 @@ pub fn valve_gsi_raw_events(
         serde_json::from_str(body).map_err(|error| IntegrationError::Parse(error.to_string()))?;
     let mut events = Vec::new();
 
+    // Round events
     if let Some(round_phase) = value
         .pointer("/round/phase")
         .and_then(Value::as_str)
-        .filter(|phase| *phase == "over")
     {
-        events.push(RawGameEvent {
-            event_id: format!("round:{round_phase}:{}", millis(now)),
-            name: "round_win".to_string(),
-            timestamp: now,
-            player: None,
-            metadata: BTreeMap::new(),
-        });
+        match round_phase {
+            "over" => {
+                if let Some(win_team) = value.pointer("/round/win_team").and_then(Value::as_str) {
+                    events.push(RawGameEvent {
+                        event_id: format!("round_win:{win_team}:{}", millis(now)),
+                        name: "round_win".to_string(),
+                        timestamp: now,
+                        player: None,
+                        metadata: [("win_team".to_string(), win_team.to_string())].into(),
+                    });
+                }
+            }
+            "freezeover" => {
+                events.push(RawGameEvent {
+                    event_id: format!("round_start:{}", millis(now)),
+                    name: "round_start".to_string(),
+                    timestamp: now,
+                    player: None,
+                    metadata: BTreeMap::new(),
+                });
+            }
+            "live" => {
+                // Round is live, could track bomb events
+            }
+            _ => {}
+        }
     }
 
+    // Bomb events (CS2)
+    if let Some(bomb_state) = value.pointer("/round/bomb").and_then(Value::as_str) {
+        match bomb_state {
+            "planted" => {
+                events.push(RawGameEvent {
+                    event_id: format!("bomb_planted:{}", millis(now)),
+                    name: "bomb_planted".to_string(),
+                    timestamp: now,
+                    player: value
+                        .pointer("/player/name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    metadata: BTreeMap::new(),
+                });
+            }
+            "defused" => {
+                events.push(RawGameEvent {
+                    event_id: format!("bomb_defused:{}", millis(now)),
+                    name: "bomb_defused".to_string(),
+                    timestamp: now,
+                    player: value
+                        .pointer("/player/name")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    metadata: BTreeMap::new(),
+                });
+            }
+            "exploded" => {
+                events.push(RawGameEvent {
+                    event_id: format!("bomb_exploded:{}", millis(now)),
+                    name: "bomb_exploded".to_string(),
+                    timestamp: now,
+                    player: None,
+                    metadata: BTreeMap::new(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Player state changes for kills/deaths/assists
     if let Some(player_state) = value.pointer("/player/state").and_then(Value::as_object) {
-        if player_state
-            .get("round_kills")
-            .and_then(Value::as_u64)
-            .unwrap_or_default()
-            >= 2
-        {
+        let player_name = value
+            .pointer("/player/name")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+
+        // Multi-kill detection (2+ kills in round)
+        if let Some(round_kills) = player_state.get("round_kills").and_then(Value::as_u64) {
+            if round_kills >= 2 {
+                let kill_count = round_kills;
+                events.push(RawGameEvent {
+                    event_id: format!("multi_kill:{kill_count}:{}", millis(now)),
+                    name: match kill_count {
+                        2 => "double_kill".to_string(),
+                        3 => "triple_kill".to_string(),
+                        4 => "quad_kill".to_string(),
+                        5 => "penta_kill".to_string(),
+                        _ => "multi_kill".to_string(),
+                    },
+                    timestamp: now,
+                    player: player_name.clone(),
+                    metadata: [("kill_count".to_string(), kill_count.to_string())].into(),
+                });
+            }
+        }
+
+        // Track total kills/deaths/assists for the match
+        if let Some(kills) = player_state.get("kills").and_then(Value::as_u64) {
+            if kills > 0 {
+                events.push(RawGameEvent {
+                    event_id: format!("kill:{kills}:{}", millis(now)),
+                    name: "kill".to_string(),
+                    timestamp: now,
+                    player: player_name.clone(),
+                    metadata: [("total_kills".to_string(), kills.to_string())].into(),
+                });
+            }
+        }
+
+        if let Some(deaths) = player_state.get("deaths").and_then(Value::as_u64) {
+            if deaths > 0 {
+                events.push(RawGameEvent {
+                    event_id: format!("death:{deaths}:{}", millis(now)),
+                    name: "death".to_string(),
+                    timestamp: now,
+                    player: player_name.clone(),
+                    metadata: [("total_deaths".to_string(), deaths.to_string())].into(),
+                });
+            }
+        }
+
+        if let Some(assists) = player_state.get("assists").and_then(Value::as_u64) {
+            if assists > 0 {
+                events.push(RawGameEvent {
+                    event_id: format!("assist:{assists}:{}", millis(now)),
+                    name: "assist".to_string(),
+                    timestamp: now,
+                    player: player_name.clone(),
+                    metadata: [("total_assists".to_string(), assists.to_string())].into(),
+                });
+            }
+        }
+
+        // MVP/Clutch detection
+        if let Some(mvps) = player_state.get("mvps").and_then(Value::as_u64) {
+            if mvps > 0 {
+                events.push(RawGameEvent {
+                    event_id: format!("mvp:{mvps}:{}", millis(now)),
+                    name: "mvp".to_string(),
+                    timestamp: now,
+                    player: player_name.clone(),
+                    metadata: [("mvp_count".to_string(), mvps.to_string())].into(),
+                });
+            }
+        }
+    }
+
+    // Match end events
+    if let Some(phase) = value.pointer("/map/phase").and_then(Value::as_str) {
+        if phase == "gameover" {
             events.push(RawGameEvent {
-                event_id: format!("multi-kill:{}", millis(now)),
-                name: "multi_kill".to_string(),
+                event_id: format!("match_end:{}", millis(now)),
+                name: "match_end".to_string(),
                 timestamp: now,
-                player: value
-                    .pointer("/player/name")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
+                player: None,
                 metadata: BTreeMap::new(),
             });
+        }
+    }
+
+    // Player activity (connect/disconnect)
+    if let Some(steamid) = value.pointer("/player/steamid").and_then(Value::as_str) {
+        if let Some(activity) = value.pointer("/player/activity").and_then(Value::as_str) {
+            match activity {
+                "playing" => {
+                    events.push(RawGameEvent {
+                        event_id: format!("player_join:{steamid}:{}", millis(now)),
+                        name: "player_join".to_string(),
+                        timestamp: now,
+                        player: value
+                            .pointer("/player/name")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                        metadata: [("steamid".to_string(), steamid.to_string())].into(),
+                    });
+                }
+                "menu" => {
+                    events.push(RawGameEvent {
+                        event_id: format!("player_leave:{steamid}:{}", millis(now)),
+                        name: "player_leave".to_string(),
+                        timestamp: now,
+                        player: value
+                            .pointer("/player/name")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                        metadata: [("steamid".to_string(), steamid.to_string())].into(),
+                    });
+                }
+                _ => {}
+            }
         }
     }
 
@@ -301,7 +472,18 @@ mod tests {
         let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].name, "multi_kill");
+        assert_eq!(events[0].name, "double_kill");
+        assert_eq!(events[0].player.as_deref(), Some("Alvin"));
+    }
+
+    #[test]
+    fn parses_valve_gsi_triple_kill() {
+        let body = r#"{"player":{"name":"Alvin","state":{"round_kills":3}}}"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].name, "triple_kill");
         assert_eq!(events[0].player.as_deref(), Some("Alvin"));
     }
 }
