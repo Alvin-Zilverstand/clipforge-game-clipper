@@ -644,6 +644,7 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         mic_enabled: recorder.settings.privacy.mic_enabled,
         system_audio_device: recorder.settings.privacy.system_audio_device.clone(),
         mic_device: recorder.settings.privacy.mic_device.clone(),
+        separate_audio_tracks: recorder.settings.privacy.separate_audio_tracks,
     };
     let backend = start_best_capture_backend(
         &ffmpeg,

@@ -42,6 +42,7 @@ pub struct CaptureConfig {
     pub mic_enabled: bool,
     pub system_audio_device: Option<String>,
     pub mic_device: Option<String>,
+    pub separate_audio_tracks: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +222,8 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
     let size = format!("{}x{}", config.width, config.height);
     let fps = config.fps.to_string();
     let bitrate = format!("{}k", config.bitrate_kbps);
+    let separate_tracks = config.system_audio_enabled && config.mic_enabled && config.separate_audio_tracks;
+    
     let mut args = vec![
         "-y".to_string(),
         "-hide_banner".to_string(),
@@ -246,7 +249,7 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
         ]),
     }
     let mut next_input_index = 1;
-    let mut audio_maps = Vec::new();
+    let mut audio_input_indices = Vec::new();
 
     if config.system_audio_enabled {
         args.extend([
@@ -258,7 +261,7 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
         ]);
-        audio_maps.push(format!("{next_input_index}:a?"));
+        audio_input_indices.push(next_input_index);
         next_input_index += 1;
     }
 
@@ -275,7 +278,7 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
                     .unwrap_or_else(|| "Microphone".to_string())
             ),
         ]);
-        audio_maps.push(format!("{next_input_index}:a?"));
+        audio_input_indices.push(next_input_index);
     }
 
     args.extend([
@@ -288,10 +291,24 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
         "-pix_fmt".to_string(),
         "yuv420p".to_string(),
     ]);
-    for audio_map in audio_maps {
-        args.extend(["-map".to_string(), audio_map]);
-    }
-    if config.system_audio_enabled || config.mic_enabled {
+    
+    if separate_tracks {
+        // Map each audio input to a separate track with its own encoder settings
+        for (idx, &input_idx) in audio_input_indices.iter().enumerate() {
+            args.extend([
+                "-map".to_string(),
+                format!("{}:a?", input_idx),
+                "-c:a:{}".to_string(), idx.to_string(),
+                "aac".to_string(),
+                "-b:a:{}".to_string(), idx.to_string(),
+                "160k".to_string(),
+            ]);
+        }
+    } else if config.system_audio_enabled || config.mic_enabled {
+        // Legacy: mix all audio into single track
+        for input_idx in audio_input_indices {
+            args.extend(["-map".to_string(), format!("{}:a?", input_idx)]);
+        }
         args.extend([
             "-c:a".to_string(),
             "aac".to_string(),
@@ -509,6 +526,7 @@ mod tests {
             mic_enabled: false,
             system_audio_device: None,
             mic_device: None,
+            separate_audio_tracks: false,
         };
 
         let plan = FfmpegRecordingPlan::for_windows_desktop("ffmpeg", "out.mp4", &config);
@@ -532,6 +550,7 @@ mod tests {
             mic_enabled: false,
             system_audio_device: None,
             mic_device: None,
+            separate_audio_tracks: false,
         };
 
         let plan = FfmpegRecordingPlan::for_windows_desktop_segments(

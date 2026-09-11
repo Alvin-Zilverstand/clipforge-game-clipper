@@ -34,6 +34,8 @@ pub struct PrivacySettings {
     pub mic_device: Option<String>,
     #[serde(default)]
     pub system_audio_device: Option<String>,
+    #[serde(default)]
+    pub separate_audio_tracks: bool,
     pub desktop_capture_requires_confirmation: bool,
     pub excluded_window_titles: Vec<String>,
     pub upload_requires_confirmation: bool,
@@ -119,6 +121,7 @@ impl AppSettings {
                 mic_enabled: false,
                 mic_device: None,
                 system_audio_device: None,
+                separate_audio_tracks: false,
                 desktop_capture_requires_confirmation: true,
                 excluded_window_titles: Vec::new(),
                 upload_requires_confirmation: true,
@@ -152,6 +155,8 @@ impl AppSettings {
         if self.upload.custom_response_url_path.trim().is_empty() {
             self.upload.custom_response_url_path = "url".to_string();
         }
+        // Ensure separate_audio_tracks defaults to false for older configs
+        // (serde default handles this, but explicit for clarity)
         self.schema_version = CURRENT_SCHEMA_VERSION;
     }
 }

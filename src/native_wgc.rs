@@ -704,6 +704,7 @@ mod tests {
             mic_enabled: false,
             system_audio_device: None,
             mic_device: None,
+            separate_audio_tracks: false,
         };
         let mut backend = NativeWgcReplayCaptureBackend::new(&pattern, Duration::from_secs(1));
 
@@ -750,6 +751,7 @@ mod tests {
             mic_enabled: false,
             system_audio_device: None,
             mic_device: None,
+            separate_audio_tracks: false,
         };
         let mut backend = NativeWgcReplayCaptureBackend::new(&pattern, Duration::from_secs(1));
 
@@ -796,6 +798,7 @@ mod tests {
             mic_enabled: true,
             system_audio_device: None,
             mic_device: None,
+            separate_audio_tracks: false,
         };
         let mut backend = NativeWgcReplayCaptureBackend::new(&pattern, Duration::from_secs(1));
 
