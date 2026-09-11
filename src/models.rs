@@ -82,9 +82,22 @@ pub enum UploadProvider {
     CustomHttp,
 }
 
+impl fmt::Display for UploadProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Catbox => "catbox",
+            Self::Litterbox => "litterbox",
+            Self::Lustful => "lustful",
+            Self::CustomHttp => "custom_http",
+        };
+        f.write_str(value)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clip {
     pub id: String,
+    pub title: Option<String>,
     pub session_id: String,
     pub game_id: String,
     pub path: PathBuf,

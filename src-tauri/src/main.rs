@@ -23,10 +23,10 @@ use clipforge::native_audio::{
 };
 use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::recorder::{RecorderAction, RecorderService};
-use clipforge::settings::{load_or_create_settings, save_settings};
+use clipforge::settings::{load_or_create_settings, save_settings, AppSettings};
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
 use clipforge::upload::{
-    CatboxUploader, CustomHttpUploader, LitterboxUploader, UploadMetadata, Uploader,
+    CatboxUploader, CustomHttpUploader, LitterboxUploader, UploadMetadata, UploadResult, Uploader,
 };
 use serde::Serialize;
 use std::env;
@@ -88,6 +88,12 @@ struct DesktopStatus {
     mic_device: Option<String>,
     auto_record_enabled: bool,
     upload_enabled: bool,
+    upload_provider: String,
+    catbox_userhash: Option<String>,
+    litterbox_expiry_hours: u8,
+    custom_upload_endpoint: Option<String>,
+    custom_upload_response_url_path: String,
+    custom_upload_headers: Vec<String>,
     session_recording: bool,
     capture_active: bool,
     capture_backend: Option<String>,
@@ -98,6 +104,7 @@ struct DesktopStatus {
     ffmpeg_path: Option<String>,
     system_audio_available: bool,
     desktop_duplication_available: bool,
+    auto_clip_enabled_events: Vec<AutoClipEventDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +133,13 @@ struct GsiConfigDto {
 struct AudioDeviceDto {
     name: String,
     kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AutoClipEventDto {
+    game_id: String,
+    event_type: String,
+    enabled: bool,
 }
 
 #[tauri::command]
@@ -283,6 +297,64 @@ fn set_auto_record_enabled(
 }
 
 #[tauri::command]
+fn set_upload_settings(
+    auto_upload_enabled: bool,
+    provider: String,
+    catbox_userhash: Option<String>,
+    litterbox_expiry_hours: u8,
+    custom_endpoint: Option<String>,
+    custom_response_url_path: String,
+    custom_headers: Vec<String>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.upload.auto_upload_enabled = auto_upload_enabled;
+    recorder.settings.upload.provider = clean_provider(&provider);
+    recorder.settings.upload.catbox_userhash = clean_optional(catbox_userhash);
+    recorder.settings.upload.litterbox_expiry_hours = match litterbox_expiry_hours {
+        1 | 12 | 24 | 72 => litterbox_expiry_hours,
+        _ => 24,
+    };
+    recorder.settings.upload.custom_endpoint = clean_optional(custom_endpoint);
+    recorder.settings.upload.custom_response_url_path = if custom_response_url_path.trim().is_empty() {
+        "url".to_string()
+    } else {
+        custom_response_url_path.trim().to_string()
+    };
+    recorder.settings.upload.custom_headers = parse_header_lines(&custom_headers.join("\n"));
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save upload settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_auto_clip_event_enabled(
+    game_id: String,
+    event_type: String,
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    let defaults = default_auto_clip_events_for_game(&game_id);
+    let events = recorder
+        .settings
+        .auto_clip
+        .enabled_events_by_game
+        .entry(game_id)
+        .or_insert_with(|| defaults.iter().map(|event| (*event).to_string()).collect());
+    if enabled {
+        events.insert(event_type);
+    } else {
+        events.remove(&event_type);
+    }
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
 fn write_gsi_configs(runtime: State<'_, AppRuntime>) -> Result<Vec<GsiConfigDto>, String> {
     write_gsi_config_templates(&runtime.library_root)
         .map_err(|error| format!("Could not write GSI configs: {error}"))
@@ -422,6 +494,9 @@ fn save_manual_clip_inner(seconds: u64, runtime: &AppRuntime) -> Result<ClipDto,
         recorder.settings.replay_buffer,
         active.segment_duration,
     );
+    let mut clip = clip;
+    maybe_auto_upload_clip(runtime, &mut recorder, &mut clip);
+    recorder.library.add_clip(clip.clone());
     persist_clip(runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
@@ -450,6 +525,10 @@ fn handle_auto_event_inner(
         return Ok(None);
     }
 
+    if !auto_clip_event_enabled(&recorder.settings, &event.game_id, &event.event_type.to_string()) {
+        return Ok(None);
+    }
+
     let action = recorder.handle_game_event(event);
     let RecorderAction::CreatedClip { clip_id, .. } = action else {
         return Ok(None);
@@ -473,6 +552,9 @@ fn handle_auto_event_inner(
     if let Some(thumbnail_path) = &clip.thumbnail_path {
         let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
     }
+    let mut clip = clip;
+    maybe_auto_upload_clip(runtime, &mut recorder, &mut clip);
+    recorder.library.add_clip(clip.clone());
     persist_clip(runtime, &clip)?;
     save_manifest(&recorder)?;
     Ok(Some(clip_to_dto(&clip)))
@@ -706,6 +788,10 @@ fn trim_clip(
 
     let clip = Clip {
         id: trimmed_id,
+        title: source_clip
+            .title
+            .as_ref()
+            .map(|title| format!("{title} (trimmed)")),
         session_id: source_clip.session_id.clone(),
         game_id: source_clip.game_id.clone(),
         path: output_path,
@@ -755,27 +841,32 @@ fn upload_clip(
     if !clip.path.exists() {
         return Err(format!("Clip file does not exist: {}", clip.path.display()));
     }
-    let metadata = UploadMetadata {
-        clip_id: clip.id.clone(),
-        game_id: clip.game_id.clone(),
-        title: clip.id.clone(),
+    let provider_name = provider.unwrap_or_else(|| recorder.settings.upload.provider.clone());
+    let history_provider = clean_provider(&provider_name);
+    let result = upload_clip_with_settings(
+        &clip,
+        &recorder.settings,
+        Some(provider_name),
+        custom_endpoint,
+        custom_response_url_path,
+    );
+    let result = match result {
+        Ok(result) => {
+            record_upload_history(runtime.inner(), &clip.id, &result.provider.to_string(), "uploaded", Some(&result.url), None);
+            result
+        }
+        Err(error) => {
+            record_upload_history(
+                runtime.inner(),
+                &clip.id,
+                &history_provider,
+                "failed",
+                None,
+                Some(&error),
+            );
+            return Err(error);
+        }
     };
-    let result = match provider.as_deref().unwrap_or("catbox") {
-        "catbox" => CatboxUploader::default().upload(&clip.path, &metadata),
-        "litterbox" => LitterboxUploader::default().upload(&clip.path, &metadata),
-        "custom_http" => CustomHttpUploader {
-            endpoint: custom_endpoint.unwrap_or_default(),
-            method: "POST".to_string(),
-            multipart_field: "file".to_string(),
-            response_url_path: custom_response_url_path.unwrap_or_else(|| "url".to_string()),
-            headers: Vec::new(),
-        }
-        .upload(&clip.path, &metadata),
-        unknown => {
-            return Err(format!("Unsupported upload provider: {unknown}"));
-        }
-    }
-    .map_err(|error| error.to_string())?;
     if !recorder
         .library
         .update_upload(&clip_id, result.provider, result.url)
@@ -792,6 +883,223 @@ fn upload_clip(
     persist_clip(runtime.inner(), &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
+}
+
+#[tauri::command]
+fn update_clip_metadata(
+    clip_id: String,
+    title: Option<String>,
+    tags: Vec<String>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<ClipDto, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let clip = recorder
+        .library
+        .all_mut()
+        .iter_mut()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("Clip {clip_id} was not found."))?;
+    clip.title = clean_optional(title);
+    clip.tags = tags
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    let clip = clip.clone();
+    persist_clip(runtime.inner(), &clip)?;
+    save_manifest(&recorder)?;
+    Ok(clip_to_dto(&clip))
+}
+
+#[tauri::command]
+fn export_clip_copy(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<String, String> {
+    let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let clip = recorder
+        .library
+        .all()
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| format!("Clip {clip_id} was not found."))?;
+    if !clip.path.exists() {
+        return Err(format!("Clip file does not exist: {}", clip.path.display()));
+    }
+    let export_dir = runtime.library_root.join("exports");
+    fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+    let title = clip
+        .title
+        .as_deref()
+        .unwrap_or(&clip.id)
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let file_name = if title.is_empty() {
+        format!("{}.mp4", clip.id)
+    } else {
+        format!("{title}.mp4")
+    };
+    let output = export_dir.join(file_name);
+    fs::copy(&clip.path, &output).map_err(|error| error.to_string())?;
+    Ok(output.display().to_string())
+}
+
+fn upload_clip_with_settings(
+    clip: &Clip,
+    settings: &AppSettings,
+    provider_override: Option<String>,
+    custom_endpoint_override: Option<String>,
+    custom_response_path_override: Option<String>,
+) -> Result<UploadResult, String> {
+    let provider = clean_provider(
+        provider_override
+            .as_deref()
+            .unwrap_or(&settings.upload.provider),
+    );
+    let metadata = UploadMetadata {
+        clip_id: clip.id.clone(),
+        game_id: clip.game_id.clone(),
+        title: clip.title.clone().unwrap_or_else(|| clip.id.clone()),
+    };
+
+    match provider.as_str() {
+        "catbox" => CatboxUploader {
+            userhash: settings.upload.catbox_userhash.clone(),
+        }
+        .upload(&clip.path, &metadata),
+        "litterbox" => LitterboxUploader {
+            expiry_hours: settings.upload.litterbox_expiry_hours,
+        }
+        .upload(&clip.path, &metadata),
+        "custom_http" => CustomHttpUploader {
+            endpoint: custom_endpoint_override
+                .and_then(|value| clean_optional(Some(value)))
+                .or_else(|| settings.upload.custom_endpoint.clone())
+                .unwrap_or_default(),
+            method: "POST".to_string(),
+            multipart_field: "file".to_string(),
+            response_url_path: custom_response_path_override
+                .and_then(|value| clean_optional(Some(value)))
+                .unwrap_or_else(|| settings.upload.custom_response_url_path.clone()),
+            headers: settings.upload.custom_headers.clone(),
+        }
+        .upload(&clip.path, &metadata),
+        "lustful" => clipforge::upload::LustfulUploader::default().upload(&clip.path, &metadata),
+        unknown => {
+            return Err(format!("Unsupported upload provider: {unknown}"));
+        }
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn maybe_auto_upload_clip(runtime: &AppRuntime, recorder: &mut RecorderService, clip: &mut Clip) {
+    if !recorder.settings.upload.auto_upload_enabled {
+        return;
+    }
+    let provider = recorder.settings.upload.provider.clone();
+    match upload_clip_with_settings(clip, &recorder.settings, None, None, None) {
+        Ok(result) => {
+            record_upload_history(
+                runtime,
+                &clip.id,
+                &result.provider.to_string(),
+                "uploaded",
+                Some(&result.url),
+                None,
+            );
+            clip.upload_provider = Some(result.provider);
+            clip.upload_url = Some(result.url);
+        }
+        Err(error) => {
+            record_upload_history(runtime, &clip.id, &provider, "failed", None, Some(&error));
+            clip.upload_url = Some(format!("clipforge://upload-failed/{provider}"));
+        }
+    }
+}
+
+fn record_upload_history(
+    runtime: &AppRuntime,
+    clip_id: &str,
+    provider: &str,
+    status: &str,
+    url: Option<&str>,
+    error: Option<&str>,
+) {
+    if let Ok(database) = runtime.database.lock() {
+        let _ = database.insert_upload_history(clip_id, provider, status, url, error, SystemTime::now());
+    }
+}
+
+fn clean_provider(provider: &str) -> String {
+    match provider.trim() {
+        "catbox" | "litterbox" | "custom_http" | "lustful" => provider.trim().to_string(),
+        _ => "catbox".to_string(),
+    }
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_header_lines(value: &str) -> Vec<(String, String)> {
+    value
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            let name = name.trim();
+            let value = value.trim();
+            if name.is_empty() || value.is_empty() {
+                None
+            } else {
+                Some((name.to_string(), value.to_string()))
+            }
+        })
+        .collect()
+}
+
+fn default_auto_clip_events_for_game(game_id: &str) -> Vec<&'static str> {
+    match game_id {
+        "league-of-legends" => vec!["kill", "death", "assist", "objective", "match_win"],
+        "counter-strike-2" => vec!["kill", "death", "assist", "round_win", "match_win", "multi_kill"],
+        "dota-2" => vec!["kill", "death", "assist", "objective", "match_win", "multi_kill"],
+        _ => Vec::new(),
+    }
+}
+
+fn auto_clip_event_enabled(settings: &AppSettings, game_id: &str, event_type: &str) -> bool {
+    if !settings.auto_clip.enabled {
+        return false;
+    }
+    settings
+        .auto_clip
+        .enabled_events_by_game
+        .get(game_id)
+        .map(|events| events.contains(event_type))
+        .unwrap_or_else(|| {
+            default_auto_clip_events_for_game(game_id)
+                .iter()
+                .any(|event| event == &event_type)
+        })
+}
+
+fn auto_clip_event_dtos(settings: &AppSettings) -> Vec<AutoClipEventDto> {
+    let games = [
+        ("league-of-legends", default_auto_clip_events_for_game("league-of-legends")),
+        ("counter-strike-2", default_auto_clip_events_for_game("counter-strike-2")),
+        ("dota-2", default_auto_clip_events_for_game("dota-2")),
+    ];
+    games
+        .into_iter()
+        .flat_map(|(game_id, events)| {
+            events.into_iter().map(move |event_type| AutoClipEventDto {
+                game_id: game_id.to_string(),
+                event_type: event_type.to_string(),
+                enabled: auto_clip_event_enabled(settings, game_id, event_type),
+            })
+        })
+        .collect()
 }
 
 fn main() {
@@ -863,17 +1171,21 @@ fn main() {
             set_mic_enabled,
             set_system_audio_enabled,
             list_audio_devices,
-            set_mic_device,
-            set_auto_record_enabled,
-            write_gsi_configs,
-            poll_auto_clip_events,
-            save_manual_clip,
-            start_capture,
-            stop_capture,
-            delete_clip,
-            reveal_clip,
-            trim_clip,
-            upload_clip
+        set_mic_device,
+        set_auto_record_enabled,
+        set_upload_settings,
+        set_auto_clip_event_enabled,
+        write_gsi_configs,
+        poll_auto_clip_events,
+        save_manual_clip,
+        start_capture,
+        stop_capture,
+        delete_clip,
+        reveal_clip,
+        trim_clip,
+        upload_clip,
+        update_clip_metadata,
+        export_clip_copy
         ])
         .run(tauri::generate_context!())
         .expect("error while running ClipForge desktop shell");
@@ -931,6 +1243,7 @@ fn add_session_clip(
 
     let clip = Clip {
         id: clip_id.clone(),
+        title: Some("Full session".to_string()),
         session_id,
         game_id,
         path: output_path,
@@ -1028,7 +1341,19 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         mic_enabled: recorder.settings.privacy.mic_enabled,
         mic_device: recorder.settings.privacy.mic_device.clone(),
         auto_record_enabled: !recorder.settings.privacy.desktop_capture_requires_confirmation,
-        upload_enabled: false,
+        upload_enabled: recorder.settings.upload.auto_upload_enabled,
+        upload_provider: recorder.settings.upload.provider.clone(),
+        catbox_userhash: recorder.settings.upload.catbox_userhash.clone(),
+        litterbox_expiry_hours: recorder.settings.upload.litterbox_expiry_hours,
+        custom_upload_endpoint: recorder.settings.upload.custom_endpoint.clone(),
+        custom_upload_response_url_path: recorder.settings.upload.custom_response_url_path.clone(),
+        custom_upload_headers: recorder
+            .settings
+            .upload
+            .custom_headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect(),
         session_recording: matches!(recorder.state.status, RecordingStatus::RecordingSession),
         capture_active: capture.is_some(),
         capture_backend: capture.map(|active| active.backend.name().to_string()),
@@ -1044,18 +1369,19 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         desktop_duplication_available: find_ffmpeg_executable()
             .map(|path| ffmpeg_supports_filter(&path, "ddagrab"))
             .unwrap_or(false),
+        auto_clip_enabled_events: auto_clip_event_dtos(&recorder.settings),
     }
 }
 
 fn clip_to_dto(clip: &Clip) -> ClipDto {
     ClipDto {
         id: clip.id.clone(),
-        title: match clip.source {
+        title: clip.title.clone().unwrap_or_else(|| match clip.source {
             ClipSource::ManualHotkey => "Manual clip".to_string(),
             ClipSource::AutoEvent => "Auto clip".to_string(),
             ClipSource::FullSessionBookmark => "Session bookmark".to_string(),
             ClipSource::Imported => "Imported clip".to_string(),
-        },
+        }),
         game: clip.game_id.clone(),
         event: clip
             .event_type
@@ -1071,6 +1397,13 @@ fn clip_to_dto(clip: &Clip) -> ClipDto {
         duration: format_duration(clip.duration),
         created_at: format_system_time(clip.created_at),
         upload_state: if clip
+            .upload_url
+            .as_deref()
+            .map(|url| url.starts_with("clipforge://upload-failed/"))
+            .unwrap_or(false)
+        {
+            "Failed".to_string()
+        } else if clip
             .upload_url
             .as_deref()
             .map(|url| url.starts_with("clipforge://upload-queued/"))

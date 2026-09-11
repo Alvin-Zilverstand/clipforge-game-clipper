@@ -354,6 +354,7 @@ impl RecorderService {
     ) -> Clip {
         Clip {
             id: clip_id.to_string(),
+            title: None,
             session_id: session_id.to_string(),
             game_id: game_id.to_string(),
             path: clip_path(&self.paths, game_id, created_at, clip_id),

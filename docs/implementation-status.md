@@ -16,7 +16,8 @@
 - Stop Capture asks FFmpeg to finalize gracefully, falls back after a short timeout, concatenates recorded segments, and adds the completed full-session MP4 to the local library.
 - Manual clips now extract from the rolling segment buffer instead of writing placeholder MP4 files.
 - Auto clips now use the same segment extraction/thumbnail pipeline as manual clips.
-- Clip detail actions are wired to the backend for Trim, Reveal, Upload, and Delete.
+- Clip detail actions are wired to the backend for Trim, Reveal, Upload, Delete, metadata updates, and export copy.
+- Clip records now support editable titles and tags, and the SQLite schema migrates older libraries to include clip titles.
 - Trim uses FFmpeg copy trimming to create a new local library clip when the source file exists.
 - Clip thumbnails are generated with FFmpeg and rendered in the library when available.
 - Clip detail preview renders the local MP4 through Tauri's asset URL conversion when available.
@@ -29,20 +30,31 @@
 - A localhost Valve GSI receiver on `127.0.0.1:49321` accepts CS2/Dota-style event posts and queues normalized event clips.
 - A backend worker loop now refreshes game detection and drains auto-clip integrations while the desktop app is running, independent of the currently selected UI view.
 - Local clip library can add, filter, remove, update upload state, write a tab-separated manifest, and persist clip metadata in SQLite.
-- Versioned local settings are saved to `settings.json`; replay buffer length and mic toggle are wired from the UI to Rust.
+- Versioned local settings are saved to `settings.json`; replay buffer length, audio toggles, mic device, auto-record, upload settings, and auto-clip event toggles are wired from the UI to Rust.
 - Storage layer creates the planned folders, sanitizes clip paths, provides test clip builders for unit coverage, and cleans oldest temporary files under a size limit.
 - Upload adapters perform live HTTP uploads for Catbox, Litterbox, and custom multipart endpoints; Lustful remains blocked behind unknown API details.
-- The UI Upload button currently performs an explicit Catbox upload for the selected clip and saves the returned URL.
+- The UI Upload button uses the selected upload provider and saved provider configuration, including Catbox userhash, Litterbox expiry, custom endpoint, response path, and custom headers.
+- Auto-upload is persisted and, when enabled, attempts upload after manual and event clips while preserving local clips on failure.
+- Upload attempts are recorded in SQLite upload history.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
+- Library search, event/upload filters, and grid/list switching are functional in the UI.
+- User-visible notices are shown for major actions and failures instead of relying only on console output.
 
 ## Not Fully Working Yet
 
 - Native Windows Graphics Capture is wired for rolling replay capture with native audio; resolution downscaling still needs more work.
 - Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work.
 - Capture has not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
-- Upload provider configuration UI is not complete; Catbox is live from the default Upload action, but Litterbox/custom HTTP need UI selection and configuration.
+- Upload retry controls and a visible upload-history screen are not complete yet.
 - Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen, but richer event mapping per game is still needed.
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
+- Trim still uses timestamp text inputs instead of draggable timeline handles.
+- Hotkeys are still hardcoded; editable hotkey registration is future work.
+- Screenshot capture is still not implemented.
+- Capture source, quality, storage cap, excluded windows, and per-game override UI are still incomplete.
+- Storage critical-low-disk guardrails are not fully wired into recording start/stop behavior.
+- Recorder service still runs inside the Tauri process instead of a separate background service process.
+- Installer onboarding, auto-update, and crash logging are still not implemented.
 
 ## Next Engineering Steps
 

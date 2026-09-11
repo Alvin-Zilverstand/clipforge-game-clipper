@@ -60,6 +60,10 @@ impl ClipLibrary {
         &self.clips
     }
 
+    pub fn all_mut(&mut self) -> &mut [Clip] {
+        &mut self.clips
+    }
+
     pub fn filter(&self, filter: &ClipFilter) -> Vec<&Clip> {
         self.clips
             .iter()
@@ -96,12 +100,13 @@ impl ClipLibrary {
     }
 
     pub fn to_manifest(&self) -> String {
-        let mut manifest = String::from("id\tgame_id\tsession_id\tpath\tduration_ms\tsource\tevent_type\ttags\tupload_provider\tupload_url\n");
+        let mut manifest = String::from("id\ttitle\tgame_id\tsession_id\tpath\tduration_ms\tsource\tevent_type\ttags\tupload_provider\tupload_url\n");
         for clip in &self.clips {
             let _ = writeln!(
                 manifest,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 escape(&clip.id),
+                escape(clip.title.as_deref().unwrap_or_default()),
                 escape(&clip.game_id),
                 escape(&clip.session_id),
                 escape(&clip.path.to_string_lossy()),

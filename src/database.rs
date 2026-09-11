@@ -26,6 +26,7 @@ impl ClipDatabase {
             "
             CREATE TABLE IF NOT EXISTS clips (
                 id TEXT PRIMARY KEY NOT NULL,
+                title TEXT,
                 session_id TEXT NOT NULL,
                 game_id TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -40,14 +41,29 @@ impl ClipDatabase {
             );
             CREATE INDEX IF NOT EXISTS clips_created_at_idx ON clips(created_at_ms DESC);
             CREATE INDEX IF NOT EXISTS clips_game_id_idx ON clips(game_id);
+            CREATE TABLE IF NOT EXISTS upload_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clip_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                status TEXT NOT NULL,
+                url TEXT,
+                error TEXT,
+                attempted_at_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS upload_history_clip_id_idx ON upload_history(clip_id);
             ",
-        )
+        )?;
+        if !self.column_exists("clips", "title")? {
+            self.connection
+                .execute("ALTER TABLE clips ADD COLUMN title TEXT", [])?;
+        }
+        self.connection.pragma_update(None, "user_version", 2)
     }
 
     pub fn load_clips(&self) -> rusqlite::Result<Vec<Clip>> {
         let mut statement = self.connection.prepare(
             "
-            SELECT id, session_id, game_id, path, thumbnail_path, created_at_ms, duration_ms,
+            SELECT id, title, session_id, game_id, path, thumbnail_path, created_at_ms, duration_ms,
                    source, event_type, tags_json, upload_url, upload_provider
             FROM clips
             ORDER BY created_at_ms DESC
@@ -55,27 +71,28 @@ impl ClipDatabase {
         )?;
 
         let rows = statement.query_map([], |row| {
-            let tags_json: String = row.get(9)?;
+            let tags_json: String = row.get(10)?;
             let tags = serde_json::from_str::<Vec<String>>(&tags_json).unwrap_or_default();
             let event_type = row
-                .get::<_, Option<String>>(8)?
+                .get::<_, Option<String>>(9)?
                 .map(|value| parse_event_type(&value));
             let upload_provider = row
-                .get::<_, Option<String>>(11)?
+                .get::<_, Option<String>>(12)?
                 .and_then(|value| parse_upload_provider(&value));
 
             Ok(Clip {
                 id: row.get(0)?,
-                session_id: row.get(1)?,
-                game_id: row.get(2)?,
-                path: PathBuf::from(row.get::<_, String>(3)?),
-                thumbnail_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-                created_at: millis_to_system_time(row.get(5)?),
-                duration: Duration::from_millis(row.get::<_, i64>(6)?.max(0) as u64),
-                source: parse_clip_source(&row.get::<_, String>(7)?),
+                title: row.get(1)?,
+                session_id: row.get(2)?,
+                game_id: row.get(3)?,
+                path: PathBuf::from(row.get::<_, String>(4)?),
+                thumbnail_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
+                created_at: millis_to_system_time(row.get(6)?),
+                duration: Duration::from_millis(row.get::<_, i64>(7)?.max(0) as u64),
+                source: parse_clip_source(&row.get::<_, String>(8)?),
                 event_type,
                 tags,
-                upload_url: row.get(10)?,
+                upload_url: row.get(11)?,
                 upload_provider,
             })
         })?;
@@ -88,11 +105,12 @@ impl ClipDatabase {
         self.connection.execute(
             "
             INSERT INTO clips (
-                id, session_id, game_id, path, thumbnail_path, created_at_ms, duration_ms,
+                id, title, session_id, game_id, path, thumbnail_path, created_at_ms, duration_ms,
                 source, event_type, tags_json, upload_url, upload_provider
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
                 session_id = excluded.session_id,
                 game_id = excluded.game_id,
                 path = excluded.path,
@@ -107,6 +125,7 @@ impl ClipDatabase {
             ",
             params![
                 clip.id,
+                clip.title.as_deref(),
                 clip.session_id,
                 clip.game_id,
                 clip.path.display().to_string(),
@@ -125,10 +144,49 @@ impl ClipDatabase {
         Ok(())
     }
 
+    pub fn insert_upload_history(
+        &self,
+        clip_id: &str,
+        provider: &str,
+        status: &str,
+        url: Option<&str>,
+        error: Option<&str>,
+        attempted_at: SystemTime,
+    ) -> rusqlite::Result<()> {
+        self.connection.execute(
+            "
+            INSERT INTO upload_history (clip_id, provider, status, url, error, attempted_at_ms)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                clip_id,
+                provider,
+                status,
+                url,
+                error,
+                system_time_to_millis(attempted_at)
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_clip(&self, clip_id: &str) -> rusqlite::Result<()> {
         self.connection
             .execute("DELETE FROM clips WHERE id = ?1", params![clip_id])?;
         Ok(())
+    }
+
+    fn column_exists(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
+        let mut statement = self
+            .connection
+            .prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+        for row in rows {
+            if row? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -207,6 +265,7 @@ mod tests {
         let database = ClipDatabase::open(&db_path).expect("database");
         let clip = Clip {
             id: "clip-1".to_string(),
+            title: Some("Opening ace".to_string()),
             session_id: "session-1".to_string(),
             game_id: "counter-strike-2".to_string(),
             path: PathBuf::from("C:/clips/clip-1.mp4"),
@@ -224,6 +283,16 @@ mod tests {
         let loaded = database.load_clips().expect("load");
 
         assert_eq!(loaded, vec![clip]);
+        database
+            .insert_upload_history(
+                "clip-1",
+                "custom_http",
+                "uploaded",
+                Some("https://example.test/clip.mp4"),
+                None,
+                SystemTime::now(),
+            )
+            .expect("upload history");
         database.delete_clip("clip-1").expect("delete");
         assert!(database.load_clips().expect("load empty").is_empty());
         let _ = std::fs::remove_file(db_path);

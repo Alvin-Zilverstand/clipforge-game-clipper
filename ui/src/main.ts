@@ -10,6 +10,7 @@ type RecordingState =
 
 type ClipSource = "Auto Event" | "Manual Hotkey" | "Bookmark" | "Imported";
 type UploadState = "Local only" | "Uploaded" | "Failed" | "Queued";
+type UploadProvider = "catbox" | "litterbox" | "custom_http" | "lustful";
 
 type Clip = {
   id: string;
@@ -30,8 +31,16 @@ type Clip = {
 
 type AutoEvent = {
   id: string;
+  gameId: string;
+  eventType: string;
   game: string;
   event: string;
+  enabled: boolean;
+};
+
+type AutoClipEventDto = {
+  game_id: string;
+  event_type: string;
   enabled: boolean;
 };
 
@@ -44,6 +53,12 @@ type DesktopStatus = {
   mic_device: string | null;
   auto_record_enabled: boolean;
   upload_enabled: boolean;
+  upload_provider: UploadProvider;
+  catbox_userhash: string | null;
+  litterbox_expiry_hours: number;
+  custom_upload_endpoint: string | null;
+  custom_upload_response_url_path: string;
+  custom_upload_headers: string[];
   session_recording: boolean;
   capture_active: boolean;
   capture_backend: string | null;
@@ -54,6 +69,7 @@ type DesktopStatus = {
   ffmpeg_path: string | null;
   system_audio_available: boolean;
   desktop_duplication_available: boolean;
+  auto_clip_enabled_events: AutoClipEventDto[];
 };
 
 type ClipDto = {
@@ -100,10 +116,17 @@ type AppState = {
   audioDevices: AudioDeviceDto[];
   autoRecordEnabled: boolean;
   autoUpload: boolean;
-  uploadProvider: "catbox" | "litterbox" | "custom_http" | "lustful";
+  uploadProvider: UploadProvider;
+  catboxUserhash: string;
+  litterboxExpiryHours: 1 | 12 | 24 | 72;
   customUploadEndpoint: string;
   customUploadResponsePath: string;
+  customUploadHeaders: string;
   gsiConfigStatus: string;
+  libraryFilter: "all" | "kills" | "wins" | "uploaded" | "failed";
+  libraryQuery: string;
+  libraryViewMode: "grid" | "list";
+  notice: string;
   selectedClipId: string;
   clips: Clip[];
   autoEvents: AutoEvent[];
@@ -144,17 +167,30 @@ const state: AppState = {
   autoRecordEnabled: false,
   autoUpload: false,
   uploadProvider: "catbox",
+  catboxUserhash: "",
+  litterboxExpiryHours: 24,
   customUploadEndpoint: "",
   customUploadResponsePath: "url",
+  customUploadHeaders: "",
   gsiConfigStatus: "",
+  libraryFilter: "all",
+  libraryQuery: "",
+  libraryViewMode: "grid",
+  notice: "",
   selectedClipId: "",
   clips: [],
   autoEvents: [
-    { id: "cs2-kill", game: "Counter-Strike 2", event: "Kill", enabled: true },
-    { id: "cs2-round", game: "Counter-Strike 2", event: "Round win", enabled: true },
-    { id: "lol-kill", game: "League of Legends", event: "Champion kill", enabled: true },
-    { id: "lol-objective", game: "League of Legends", event: "Objective", enabled: true },
-    { id: "dota-objective", game: "Dota 2", event: "Roshan/objective", enabled: false },
+    { id: "cs2-kill", gameId: "counter-strike-2", eventType: "kill", game: "Counter-Strike 2", event: "Kill", enabled: true },
+    { id: "cs2-death", gameId: "counter-strike-2", eventType: "death", game: "Counter-Strike 2", event: "Death", enabled: true },
+    { id: "cs2-round", gameId: "counter-strike-2", eventType: "round_win", game: "Counter-Strike 2", event: "Round win", enabled: true },
+    { id: "cs2-multi", gameId: "counter-strike-2", eventType: "multi_kill", game: "Counter-Strike 2", event: "Multi-kill", enabled: true },
+    { id: "lol-kill", gameId: "league-of-legends", eventType: "kill", game: "League of Legends", event: "Champion kill", enabled: true },
+    { id: "lol-death", gameId: "league-of-legends", eventType: "death", game: "League of Legends", event: "Death", enabled: true },
+    { id: "lol-assist", gameId: "league-of-legends", eventType: "assist", game: "League of Legends", event: "Assist", enabled: true },
+    { id: "lol-objective", gameId: "league-of-legends", eventType: "objective", game: "League of Legends", event: "Objective", enabled: true },
+    { id: "dota-kill", gameId: "dota-2", eventType: "kill", game: "Dota 2", event: "Kill", enabled: true },
+    { id: "dota-objective", gameId: "dota-2", eventType: "objective", game: "Dota 2", event: "Roshan/objective", enabled: true },
+    { id: "dota-multi", gameId: "dota-2", eventType: "multi_kill", game: "Dota 2", event: "Multi-kill", enabled: true },
   ],
 };
 
@@ -188,6 +224,7 @@ function render() {
 
       <section class="workspace">
         ${renderRecordingBar()}
+        ${state.notice ? `<div class="notice" role="status">${escapeHtml(state.notice)}</div>` : ""}
         ${renderActiveView(selectedClip)}
       </section>
     </main>
@@ -235,6 +272,7 @@ function renderActiveView(selectedClip: Clip | undefined) {
 }
 
 function renderLibraryView(selectedClip: Clip | undefined) {
+  const clips = filteredClips();
   return `
     <section class="content-grid">
       <section class="library-panel">
@@ -244,18 +282,27 @@ function renderLibraryView(selectedClip: Clip | undefined) {
             <h2>Recent Clips</h2>
           </div>
           <div class="segmented">
-            <button class="selected">Grid</button>
-            <button>List</button>
+            <button class="${state.libraryViewMode === "grid" ? "selected" : ""}" data-view-mode="grid">Grid</button>
+            <button class="${state.libraryViewMode === "list" ? "selected" : ""}" data-view-mode="list">List</button>
           </div>
         </div>
+        <input class="search-input" placeholder="Search clips, games, events, tags" value="${escapeHtml(state.libraryQuery)}" data-action="library-search" />
         <div class="filters">
-          <button class="selected">All</button>
-          <button>Kills</button>
-          <button>Wins</button>
-          <button>Uploaded</button>
+          ${[
+            ["all", "All"],
+            ["kills", "Kills"],
+            ["wins", "Wins"],
+            ["uploaded", "Uploaded"],
+            ["failed", "Failed"],
+          ]
+            .map(
+              ([filter, label]) =>
+                `<button class="${state.libraryFilter === filter ? "selected" : ""}" data-library-filter="${filter}">${label}</button>`,
+            )
+            .join("")}
         </div>
-        <div class="clip-grid">
-          ${state.clips.length > 0 ? state.clips.map(renderClipCard).join("") : `<div class="empty-state">No clips saved yet</div>`}
+        <div class="${state.libraryViewMode === "list" ? "clip-list" : "clip-grid"}">
+          ${clips.length > 0 ? clips.map(renderClipCard).join("") : `<div class="empty-state">No matching clips</div>`}
         </div>
       </section>
       ${renderClipDetails(selectedClip)}
@@ -286,10 +333,10 @@ function renderClipCard(clip: Clip) {
   return `
     <article class="clip-card ${state.selectedClipId === clip.id ? "selected" : ""}" data-clip-id="${clip.id}">
       <div class="thumb ${clip.colorClass}">
-        ${clip.thumbnailUrl ? `<img src="${clip.thumbnailUrl}" alt="" />` : clip.event}
+        ${clip.thumbnailUrl ? `<img src="${clip.thumbnailUrl}" alt="" />` : escapeHtml(clip.event)}
       </div>
-      <h3>${clip.title}</h3>
-      <p>${clip.game} · ${clip.source} · ${clip.duration}</p>
+      <h3>${escapeHtml(clip.title)}</h3>
+      <p>${escapeHtml(clip.game)} · ${escapeHtml(clip.source)} · ${escapeHtml(clip.duration)}</p>
     </article>
   `;
 }
@@ -314,17 +361,20 @@ function renderClipDetails(clip: Clip | undefined) {
             : `<span>Preview</span>`
         }
       </div>
-      <h2>${clip.title}</h2>
-      <p class="muted">${clip.game} · ${clip.event} · ${clip.createdAt} · ${clip.uploadState}</p>
-      <div class="tag-row">${clip.tags.map((tag) => `<span>${tag}</span>`).join("")}</div>
-      <p class="muted file-path">${clip.path || "Clip file unavailable"}</p>
+      <label>Title <input value="${escapeHtml(clip.title)}" data-action="clip-title" /></label>
+      <p class="muted">${escapeHtml(clip.game)} · ${escapeHtml(clip.event)} · ${escapeHtml(clip.createdAt)} · ${escapeHtml(clip.uploadState)}</p>
+      <label>Tags <input value="${escapeHtml(clip.tags.join(", "))}" data-action="clip-tags" /></label>
+      <div class="tag-row">${clip.tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>
+      <p class="muted file-path">${escapeHtml(clip.path || "Clip file unavailable")}</p>
       <div class="trim-row">
         <label>Start <input value="00:00" data-action="trim-start" /></label>
-        <label>End <input value="${clip.duration}" data-action="trim-end" /></label>
+        <label>End <input value="${escapeHtml(clip.duration)}" data-action="trim-end" /></label>
       </div>
       <div class="actions">
+        <button data-action="save-metadata">Save Info</button>
         <button data-action="process">Trim</button>
         <button data-action="reveal">Reveal</button>
+        <button data-action="export-copy">Export</button>
         <button data-action="upload">Upload</button>
         <button data-action="delete">Delete</button>
       </div>
@@ -391,7 +441,7 @@ function renderAutoClipView() {
           .map(
             (event) => `
               <label class="event-row">
-                <span><strong>${event.game}</strong><small>${event.event}</small></span>
+                <span><strong>${escapeHtml(event.game)}</strong><small>${escapeHtml(event.event)}</small></span>
                 <input type="checkbox" ${event.enabled ? "checked" : ""} data-event-id="${event.id}" />
               </label>
             `,
@@ -407,9 +457,9 @@ function renderAutoClipView() {
 }
 
 function renderUploadsView() {
-  const providers: Array<{ id: AppState["uploadProvider"]; title: string; body: string }> = [
+  const providers: Array<{ id: UploadProvider; title: string; body: string }> = [
     { id: "catbox", title: "Catbox", body: "Anonymous or userhash-backed permanent uploads." },
-    { id: "litterbox", title: "Litterbox", body: "Temporary uploads with a 24 hour default expiry." },
+    { id: "litterbox", title: "Litterbox", body: "Temporary uploads with a selectable expiry." },
     { id: "custom_http", title: "Custom HTTP", body: "POST multipart clip files to your own endpoint." },
     { id: "lustful", title: "Lustful", body: "Blocked until API details are confirmed." },
   ];
@@ -426,10 +476,28 @@ function renderUploadsView() {
         </article>
       `).join("")}
       <article class="settings-panel">
+        <p class="eyebrow">Automation</p>
+        <h2>Upload Rules</h2>
+        <label class="toggle"><input type="checkbox" ${state.autoUpload ? "checked" : ""} data-action="toggle-auto-upload" /> Auto-upload after clipping</label>
+      </article>
+      <article class="settings-panel">
+        <p class="eyebrow">Catbox</p>
+        <h2>Userhash</h2>
+        <label>Optional userhash <input value="${escapeHtml(state.catboxUserhash)}" data-action="catbox-userhash" /></label>
+      </article>
+      <article class="settings-panel">
+        <p class="eyebrow">Litterbox</p>
+        <h2>Expiry</h2>
+        <select data-action="litterbox-expiry">
+          ${[1, 12, 24, 72].map((hours) => `<option value="${hours}" ${state.litterboxExpiryHours === hours ? "selected" : ""}>${hours} hour${hours === 1 ? "" : "s"}</option>`).join("")}
+        </select>
+      </article>
+      <article class="settings-panel">
         <p class="eyebrow">Custom HTTP</p>
         <h2>Endpoint</h2>
-        <label>URL <input value="${state.customUploadEndpoint}" data-action="custom-upload-endpoint" /></label>
-        <label>Response path <input value="${state.customUploadResponsePath}" data-action="custom-upload-response-path" /></label>
+        <label>URL <input value="${escapeHtml(state.customUploadEndpoint)}" data-action="custom-upload-endpoint" /></label>
+        <label>Response path <input value="${escapeHtml(state.customUploadResponsePath)}" data-action="custom-upload-response-path" /></label>
+        <label>Headers <textarea data-action="custom-upload-headers">${escapeHtml(state.customUploadHeaders)}</textarea></label>
       </article>
     </section>
   `;
@@ -473,6 +541,25 @@ function bindEvents() {
     });
   });
 
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-view-mode]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.libraryViewMode = button.dataset.viewMode === "list" ? "list" : "grid";
+      render();
+    });
+  });
+
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-library-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.libraryFilter = (button.dataset.libraryFilter as AppState["libraryFilter"]) ?? "all";
+      render();
+    });
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='library-search']")?.addEventListener("input", (event) => {
+    state.libraryQuery = (event.target as HTMLInputElement).value;
+    render();
+  });
+
   appRoot.querySelector<HTMLButtonElement>("[data-action='clip']")?.addEventListener("click", () => {
     void saveClip();
   });
@@ -485,12 +572,20 @@ function bindEvents() {
     void trimSelectedClip();
   });
 
+  appRoot.querySelector<HTMLButtonElement>("[data-action='save-metadata']")?.addEventListener("click", () => {
+    void saveSelectedClipMetadata();
+  });
+
   appRoot.querySelector<HTMLButtonElement>("[data-action='reveal']")?.addEventListener("click", () => {
     void revealSelectedClip();
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='upload']")?.addEventListener("click", () => {
     void uploadSelectedClip();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='export-copy']")?.addEventListener("click", () => {
+    void exportSelectedClip();
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='write-gsi-configs']")?.addEventListener("click", () => {
@@ -529,6 +624,7 @@ function bindEvents() {
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-upload']")?.addEventListener("change", (event) => {
     state.autoUpload = (event.target as HTMLInputElement).checked;
     render();
+    void saveUploadSettings();
   });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-record']")?.addEventListener("change", (event) => {
@@ -539,17 +635,41 @@ function bindEvents() {
 
   appRoot.querySelectorAll<HTMLButtonElement>("[data-upload-provider]").forEach((button) => {
     button.addEventListener("click", () => {
-      state.uploadProvider = button.dataset.uploadProvider as AppState["uploadProvider"];
+      state.uploadProvider = button.dataset.uploadProvider as UploadProvider;
       render();
+      void saveUploadSettings();
     });
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='catbox-userhash']")?.addEventListener("change", (event) => {
+    state.catboxUserhash = (event.target as HTMLInputElement).value;
+    void saveUploadSettings();
+  });
+
+  appRoot.querySelector<HTMLSelectElement>("[data-action='litterbox-expiry']")?.addEventListener("change", (event) => {
+    state.litterboxExpiryHours = Number((event.target as HTMLSelectElement).value) as AppState["litterboxExpiryHours"];
+    void saveUploadSettings();
   });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-endpoint']")?.addEventListener("input", (event) => {
     state.customUploadEndpoint = (event.target as HTMLInputElement).value;
   });
+  appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-endpoint']")?.addEventListener("change", () => {
+    void saveUploadSettings();
+  });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-response-path']")?.addEventListener("input", (event) => {
     state.customUploadResponsePath = (event.target as HTMLInputElement).value;
+  });
+  appRoot.querySelector<HTMLInputElement>("[data-action='custom-upload-response-path']")?.addEventListener("change", () => {
+    void saveUploadSettings();
+  });
+
+  appRoot.querySelector<HTMLTextAreaElement>("[data-action='custom-upload-headers']")?.addEventListener("input", (event) => {
+    state.customUploadHeaders = (event.target as HTMLTextAreaElement).value;
+  });
+  appRoot.querySelector<HTMLTextAreaElement>("[data-action='custom-upload-headers']")?.addEventListener("change", () => {
+    void saveUploadSettings();
   });
 
   appRoot.querySelectorAll<HTMLInputElement>("[data-event-id]").forEach((input) => {
@@ -557,6 +677,7 @@ function bindEvents() {
       const eventRule = state.autoEvents.find((event) => event.id === input.dataset.eventId);
       if (eventRule) {
         eventRule.enabled = input.checked;
+        void saveAutoClipEventSetting(eventRule);
       }
     });
   });
@@ -573,12 +694,14 @@ async function saveClip() {
       state.clips.unshift(clip);
       state.selectedClipId = clip.id;
       state.activeView = "Library";
-      state.recordingState = "Processing";
-      await refreshClips();
+    state.recordingState = "Processing";
+    await refreshClips();
+      showNotice("Clip saved");
       render();
       return;
     } catch (error) {
       console.error("Could not save desktop clip", error);
+      showNotice(`Could not save clip: ${String(error)}`);
     }
   }
 
@@ -609,10 +732,12 @@ async function toggleRecording() {
       const status = await tauriInvoke<DesktopStatus>(state.captureActive ? "stop_capture" : "start_capture");
       applyDesktopStatus(status);
       await refreshClips();
+      showNotice(state.captureActive ? "Recording started" : "Recording stopped");
       render();
       return;
     } catch (error) {
       console.error("Could not toggle desktop recording", error);
+      showNotice(`Could not toggle recording: ${String(error)}`);
     }
   }
 
@@ -630,6 +755,12 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.micDevice = status.mic_device ?? "";
   state.autoRecordEnabled = status.auto_record_enabled;
   state.autoUpload = status.upload_enabled;
+  state.uploadProvider = status.upload_provider;
+  state.catboxUserhash = status.catbox_userhash ?? "";
+  state.litterboxExpiryHours = validLitterboxExpiry(status.litterbox_expiry_hours);
+  state.customUploadEndpoint = status.custom_upload_endpoint ?? "";
+  state.customUploadResponsePath = status.custom_upload_response_url_path;
+  state.customUploadHeaders = status.custom_upload_headers.join("\n");
   state.sessionRecording = status.session_recording;
   state.captureActive = status.capture_active;
   state.captureBackend = status.capture_backend;
@@ -638,6 +769,14 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.ffmpegPath = status.ffmpeg_path;
   state.systemAudioAvailable = status.system_audio_available;
   state.desktopDuplicationAvailable = status.desktop_duplication_available;
+  for (const event of state.autoEvents) {
+    const enabled = status.auto_clip_enabled_events.find(
+      (candidate) => candidate.game_id === event.gameId && candidate.event_type === event.eventType,
+    );
+    if (enabled) {
+      event.enabled = enabled.enabled;
+    }
+  }
 }
 
 async function trimSelectedClip() {
@@ -665,9 +804,38 @@ async function trimSelectedClip() {
     state.clips.unshift(trimmed);
     state.selectedClipId = trimmed.id;
     await refreshClips();
+    showNotice("Trimmed clip created");
     render();
   } catch (error) {
     console.error("Could not trim clip", error);
+    showNotice(`Could not trim clip: ${String(error)}`);
+  }
+}
+
+async function saveSelectedClipMetadata() {
+  if (!tauriInvoke || !state.selectedClipId) {
+    return;
+  }
+
+  const title = appRoot.querySelector<HTMLInputElement>("[data-action='clip-title']")?.value ?? "";
+  const tags = (appRoot.querySelector<HTMLInputElement>("[data-action='clip-tags']")?.value ?? "")
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0);
+
+  try {
+    const dto = await tauriInvoke<ClipDto>("update_clip_metadata", {
+      clipId: state.selectedClipId,
+      title,
+      tags,
+    });
+    const updated = clipFromDto(dto);
+    state.clips = state.clips.map((clip) => (clip.id === updated.id ? updated : clip));
+    showNotice("Clip info saved");
+    render();
+  } catch (error) {
+    console.error("Could not save clip info", error);
+    showNotice(`Could not save clip info: ${String(error)}`);
   }
 }
 
@@ -680,6 +848,7 @@ async function revealSelectedClip() {
     await tauriInvoke("reveal_clip", { clipId: state.selectedClipId });
   } catch (error) {
     console.error("Could not reveal clip", error);
+    showNotice(`Could not reveal clip: ${String(error)}`);
   }
 }
 
@@ -697,9 +866,26 @@ async function uploadSelectedClip() {
     });
     const updated = clipFromDto(dto);
     state.clips = state.clips.map((clip) => (clip.id === updated.id ? updated : clip));
+    showNotice("Clip uploaded");
     render();
   } catch (error) {
     console.error("Could not queue upload", error);
+    showNotice(`Could not upload clip: ${String(error)}`);
+  }
+}
+
+async function exportSelectedClip() {
+  if (!tauriInvoke || !state.selectedClipId) {
+    return;
+  }
+
+  try {
+    const path = await tauriInvoke<string>("export_clip_copy", { clipId: state.selectedClipId });
+    showNotice(`Exported to ${path}`);
+    render();
+  } catch (error) {
+    console.error("Could not export clip", error);
+    showNotice(`Could not export clip: ${String(error)}`);
   }
 }
 
@@ -711,6 +897,7 @@ async function writeGsiConfigs() {
   try {
     const configs = await tauriInvoke<GsiConfigDto[]>("write_gsi_configs");
     state.gsiConfigStatus = configs.map((config) => `${config.game_id}: ${config.path}`).join(" · ");
+    showNotice("GSI configs written");
     render();
   } catch (error) {
     state.gsiConfigStatus = `Could not write GSI configs: ${String(error)}`;
@@ -727,9 +914,11 @@ async function deleteSelectedClip() {
     const clips = await tauriInvoke<ClipDto[]>("delete_clip", { clipId: state.selectedClipId });
     state.clips = clips.map(clipFromDto);
     state.selectedClipId = state.clips[0]?.id ?? "";
+    showNotice("Clip deleted");
     render();
   } catch (error) {
     console.error("Could not delete clip", error);
+    showNotice(`Could not delete clip: ${String(error)}`);
   }
 }
 
@@ -860,6 +1049,89 @@ async function pollAutoClips() {
   } catch (error) {
     console.warn("Could not poll auto clips", error);
   }
+}
+
+async function saveUploadSettings() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_upload_settings", {
+      autoUploadEnabled: state.autoUpload,
+      provider: state.uploadProvider,
+      catboxUserhash: state.catboxUserhash || null,
+      litterboxExpiryHours: state.litterboxExpiryHours,
+      customEndpoint: state.customUploadEndpoint || null,
+      customResponseUrlPath: state.customUploadResponsePath,
+      customHeaders: state.customUploadHeaders
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0),
+    });
+    applyDesktopStatus(status);
+    showNotice("Upload settings saved");
+    render();
+  } catch (error) {
+    console.warn("Could not save upload settings", error);
+    showNotice(`Could not save upload settings: ${String(error)}`);
+  }
+}
+
+async function saveAutoClipEventSetting(eventRule: AutoEvent) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_auto_clip_event_enabled", {
+      gameId: eventRule.gameId,
+      eventType: eventRule.eventType,
+      enabled: eventRule.enabled,
+    });
+    applyDesktopStatus(status);
+    showNotice("Auto-clip rule saved");
+    render();
+  } catch (error) {
+    console.warn("Could not save auto-clip rule", error);
+    showNotice(`Could not save auto-clip rule: ${String(error)}`);
+  }
+}
+
+function filteredClips() {
+  const query = state.libraryQuery.trim().toLowerCase();
+  return state.clips.filter((clip) => {
+    const matchesFilter =
+      state.libraryFilter === "all" ||
+      (state.libraryFilter === "kills" && clip.event.toLowerCase().includes("kill")) ||
+      (state.libraryFilter === "wins" && clip.event.toLowerCase().includes("win")) ||
+      (state.libraryFilter === "uploaded" && clip.uploadState === "Uploaded") ||
+      (state.libraryFilter === "failed" && clip.uploadState === "Failed");
+    if (!matchesFilter) {
+      return false;
+    }
+    if (!query) {
+      return true;
+    }
+    return [clip.title, clip.game, clip.event, clip.source, clip.uploadState, clip.path, ...clip.tags]
+      .join(" ")
+      .toLowerCase()
+      .includes(query);
+  });
+}
+
+function validLitterboxExpiry(value: number): AppState["litterboxExpiryHours"] {
+  return value === 1 || value === 12 || value === 24 || value === 72 ? value : 24;
+}
+
+function showNotice(message: string) {
+  state.notice = message;
+  window.setTimeout(() => {
+    if (state.notice === message) {
+      state.notice = "";
+      render();
+    }
+  }, 5_000);
 }
 
 function parseTimestamp(value: string) {
