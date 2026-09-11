@@ -70,6 +70,10 @@ type DesktopStatus = {
   system_audio_available: boolean;
   desktop_duplication_available: boolean;
   auto_clip_enabled_events: AutoClipEventDto[];
+  hotkey_clip_last_60s: string;
+  hotkey_clip_last_30s: string;
+  hotkey_toggle_session_recording: string;
+  hotkey_screenshot: string;
 };
 
 type ClipDto = {
@@ -130,6 +134,10 @@ type AppState = {
   selectedClipId: string;
   clips: Clip[];
   autoEvents: AutoEvent[];
+  hotkeyClipLast60s: string;
+  hotkeyClipLast30s: string;
+  hotkeyToggleRecording: string;
+  hotkeyScreenshot: string;
 };
 
 type TauriGlobal = {
@@ -192,6 +200,10 @@ const state: AppState = {
     { id: "dota-objective", gameId: "dota-2", eventType: "objective", game: "Dota 2", event: "Roshan/objective", enabled: true },
     { id: "dota-multi", gameId: "dota-2", eventType: "multi_kill", game: "Dota 2", event: "Multi-kill", enabled: true },
   ],
+  hotkeyClipLast60s: "F8",
+  hotkeyClipLast30s: "Shift+F8",
+  hotkeyToggleRecording: "Alt+F7",
+  hotkeyScreenshot: "F9",
 };
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -519,8 +531,13 @@ function renderSettingsView() {
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Hotkeys</p>
-        <h2>F8 saves last 60s</h2>
-        <p class="muted">Shift+F8 saves 30s · Alt+F7 toggles session recording.</p>
+        <h2>Customizable</h2>
+        <label>Clip last 60s <input value="${escapeHtml(state.hotkeyClipLast60s)}" data-action="hotkey-clip-60s" placeholder="e.g. F8" /></label>
+        <label>Clip last 30s <input value="${escapeHtml(state.hotkeyClipLast30s)}" data-action="hotkey-clip-30s" placeholder="e.g. Shift+F8" /></label>
+        <label>Toggle recording <input value="${escapeHtml(state.hotkeyToggleRecording)}" data-action="hotkey-toggle-recording" placeholder="e.g. Alt+F7" /></label>
+        <label>Screenshot <input value="${escapeHtml(state.hotkeyScreenshot)}" data-action="hotkey-screenshot" placeholder="e.g. F9" /></label>
+        <p class="muted">Format: [Modifier+]Key (e.g. Ctrl+Shift+F1, Alt+F7, F8). Modifiers: Ctrl, Shift, Alt, Meta.</p>
+        <button data-action="save-hotkeys">Save Hotkeys</button>
       </article>
     </section>
   `;
@@ -681,6 +698,22 @@ function bindEvents() {
       }
     });
   });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='hotkey-clip-60s']")?.addEventListener("change", (event) => {
+    state.hotkeyClipLast60s = (event.target as HTMLInputElement).value;
+  });
+  appRoot.querySelector<HTMLInputElement>("[data-action='hotkey-clip-30s']")?.addEventListener("change", (event) => {
+    state.hotkeyClipLast30s = (event.target as HTMLInputElement).value;
+  });
+  appRoot.querySelector<HTMLInputElement>("[data-action='hotkey-toggle-recording']")?.addEventListener("change", (event) => {
+    state.hotkeyToggleRecording = (event.target as HTMLInputElement).value;
+  });
+  appRoot.querySelector<HTMLInputElement>("[data-action='hotkey-screenshot']")?.addEventListener("change", (event) => {
+    state.hotkeyScreenshot = (event.target as HTMLInputElement).value;
+  });
+  appRoot.querySelector<HTMLButtonElement>("[data-action='save-hotkeys']")?.addEventListener("click", () => {
+    void saveHotkeys();
+  });
 }
 
 async function saveClip() {
@@ -777,6 +810,10 @@ function applyDesktopStatus(status: DesktopStatus) {
       event.enabled = enabled.enabled;
     }
   }
+  state.hotkeyClipLast60s = status.hotkey_clip_last_60s;
+  state.hotkeyClipLast30s = status.hotkey_clip_last_30s;
+  state.hotkeyToggleRecording = status.hotkey_toggle_session_recording;
+  state.hotkeyScreenshot = status.hotkey_screenshot;
 }
 
 async function trimSelectedClip() {
@@ -1095,6 +1132,27 @@ async function saveAutoClipEventSetting(eventRule: AutoEvent) {
   } catch (error) {
     console.warn("Could not save auto-clip rule", error);
     showNotice(`Could not save auto-clip rule: ${String(error)}`);
+  }
+}
+
+async function saveHotkeys() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_hotkeys", {
+      clip_last_60s: state.hotkeyClipLast60s,
+      clip_last_30s: state.hotkeyClipLast30s,
+      toggle_session_recording: state.hotkeyToggleRecording,
+      screenshot: state.hotkeyScreenshot,
+    });
+    applyDesktopStatus(status);
+    showNotice("Hotkeys saved");
+    render();
+  } catch (error) {
+    console.warn("Could not save hotkeys", error);
+    showNotice(`Could not save hotkeys: ${String(error)}`);
   }
 }
 

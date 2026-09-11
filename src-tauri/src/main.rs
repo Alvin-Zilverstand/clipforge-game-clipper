@@ -47,6 +47,14 @@ struct AppRuntime {
     capture: Mutex<Option<ActiveCapture>>,
     league_poller: Mutex<LeagueLiveClientPoller>,
     valve_events: Mutex<Vec<RawGameEvent>>,
+    hotkey_shortcuts: Mutex<Option<HotkeyShortcuts>>,
+    app_handle: Mutex<Option<tauri::AppHandle>>,
+}
+
+struct HotkeyShortcuts {
+    clip_60: tauri_plugin_global_shortcut::Shortcut,
+    clip_30: tauri_plugin_global_shortcut::Shortcut,
+    toggle_recording: tauri_plugin_global_shortcut::Shortcut,
 }
 
 struct ActiveCapture {
@@ -105,6 +113,10 @@ struct DesktopStatus {
     system_audio_available: bool,
     desktop_duplication_available: bool,
     auto_clip_enabled_events: Vec<AutoClipEventDto>,
+    hotkey_clip_last_60s: String,
+    hotkey_clip_last_30s: String,
+    hotkey_toggle_session_recording: String,
+    hotkey_screenshot: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1102,6 +1114,166 @@ fn auto_clip_event_dtos(settings: &AppSettings) -> Vec<AutoClipEventDto> {
         .collect()
 }
 
+#[cfg(desktop)]
+fn parse_accelerator(accel: &str) -> Result<(Option<tauri_plugin_global_shortcut::Modifiers>, tauri_plugin_global_shortcut::Code), String> {
+    use tauri_plugin_global_shortcut::{Code, Modifiers};
+    
+    let parts: Vec<&str> = accel.split('+').collect();
+    let key_str = parts.last().ok_or("Empty accelerator")?.trim();
+    
+    let code = match key_str.to_uppercase().as_str() {
+        "F1" => Code::F1, "F2" => Code::F2, "F3" => Code::F3, "F4" => Code::F4,
+        "F5" => Code::F5, "F6" => Code::F6, "F7" => Code::F7, "F8" => Code::F8,
+        "F9" => Code::F9, "F10" => Code::F10, "F11" => Code::F11, "F12" => Code::F12,
+        "A" => Code::KeyA, "B" => Code::KeyB, "C" => Code::KeyC, "D" => Code::KeyD,
+        "E" => Code::KeyE, "F" => Code::KeyF, "G" => Code::KeyG, "H" => Code::KeyH,
+        "I" => Code::KeyI, "J" => Code::KeyJ, "K" => Code::KeyK, "L" => Code::KeyL,
+        "M" => Code::KeyM, "N" => Code::KeyN, "O" => Code::KeyO, "P" => Code::KeyP,
+        "Q" => Code::KeyQ, "R" => Code::KeyR, "S" => Code::KeyS, "T" => Code::KeyT,
+        "U" => Code::KeyU, "V" => Code::KeyV, "W" => Code::KeyW, "X" => Code::KeyX,
+        "Y" => Code::KeyY, "Z" => Code::KeyZ,
+        "0" => Code::Digit0, "1" => Code::Digit1, "2" => Code::Digit2, "3" => Code::Digit3,
+        "4" => Code::Digit4, "5" => Code::Digit5, "6" => Code::Digit6, "7" => Code::Digit7,
+        "8" => Code::Digit8, "9" => Code::Digit9,
+        "SPACE" => Code::Space, "ENTER" => Code::Enter, "ESCAPE" => Code::Escape,
+        "TAB" => Code::Tab, "BACKSPACE" => Code::Backspace, "DELETE" => Code::Delete,
+        "UP" => Code::ArrowUp, "DOWN" => Code::ArrowDown, "LEFT" => Code::ArrowLeft, "RIGHT" => Code::ArrowRight,
+        "HOME" => Code::Home, "END" => Code::End, "PAGEUP" => Code::PageUp, "PAGEDOWN" => Code::PageDown,
+        "INSERT" => Code::Insert, "NUMLOCK" => Code::NumLock, "SCROLLLOCK" => Code::ScrollLock, "PAUSE" => Code::Pause,
+        _ => return Err(format!("Unsupported key: {}", key_str)),
+    };
+    
+    let mut modifiers = Modifiers::empty();
+    for modifier in &parts[..parts.len().saturating_sub(1)] {
+        match modifier.trim().to_uppercase().as_str() {
+            "CTRL" | "CONTROL" => modifiers |= Modifiers::CONTROL,
+            "SHIFT" => modifiers |= Modifiers::SHIFT,
+            "ALT" => modifiers |= Modifiers::ALT,
+            "META" | "SUPER" | "COMMAND" => modifiers |= Modifiers::SUPER,
+            _ => return Err(format!("Unsupported modifier: {}", modifier)),
+        }
+    }
+    
+    Ok((if modifiers.is_empty() { None } else { Some(modifiers) }, code))
+}
+
+#[cfg(desktop)]
+fn register_hotkeys(
+    app: &tauri::AppHandle,
+    runtime: &AppRuntime,
+) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+    
+    let settings = {
+        let recorder = runtime.recorder.lock().map_err(|e| e.to_string())?;
+        recorder.settings.hotkeys.clone()
+    };
+    
+    // Unregister existing shortcuts
+    if let Ok(mut shortcuts_guard) = runtime.hotkey_shortcuts.lock() {
+        if let Some(existing) = shortcuts_guard.take() {
+            let _ = app.global_shortcut().unregister(existing.clip_60);
+            let _ = app.global_shortcut().unregister(existing.clip_30);
+            let _ = app.global_shortcut().unregister(existing.toggle_recording);
+        }
+    }
+    
+    // Parse new shortcuts
+    let (clip_60_mods, clip_60_code) = parse_accelerator(&settings.clip_last_60s)?;
+    let (clip_30_mods, clip_30_code) = parse_accelerator(&settings.clip_last_30s)?;
+    let (toggle_mods, toggle_code) = parse_accelerator(&settings.toggle_session_recording)?;
+    
+    let clip_60 = Shortcut::new(clip_60_mods, clip_60_code);
+    let clip_30 = Shortcut::new(clip_30_mods, clip_30_code);
+    let toggle_recording = Shortcut::new(toggle_mods, toggle_code);
+    
+    let handler_clip_60 = clip_60.clone();
+    let handler_clip_30 = clip_30.clone();
+    let handler_toggle_recording = toggle_recording.clone();
+    
+    app.plugin(
+        tauri_plugin_global_shortcut::Builder::new()
+            .with_handler(move |app, shortcut, event| {
+                if event.state() != ShortcutState::Pressed {
+                    return;
+                }
+                let runtime = app.state::<AppRuntime>();
+                if shortcut == &handler_clip_60 {
+                    let _ = save_manual_clip_inner(60, runtime.inner());
+                } else if shortcut == &handler_clip_30 {
+                    let _ = save_manual_clip_inner(30, runtime.inner());
+                } else if shortcut == &handler_toggle_recording {
+                    let capture_active = runtime
+                        .capture
+                        .lock()
+                        .map(|capture| capture.is_some())
+                        .unwrap_or(false);
+                    if capture_active {
+                        let _ = stop_capture_inner(runtime.inner());
+                    } else {
+                        let _ = start_capture_inner(runtime.inner());
+                    }
+                }
+            })
+            .build(),
+    ).map_err(|e| e.to_string())?;
+    
+    app.global_shortcut().register(clip_60.clone()).map_err(|e| e.to_string())?;
+    app.global_shortcut().register(clip_30.clone()).map_err(|e| e.to_string())?;
+    app.global_shortcut().register(toggle_recording.clone()).map_err(|e| e.to_string())?;
+    
+    if let Ok(mut shortcuts_guard) = runtime.hotkey_shortcuts.lock() {
+        *shortcuts_guard = Some(HotkeyShortcuts {
+            clip_60,
+            clip_30,
+            toggle_recording,
+        });
+    }
+    
+    Ok(())
+}
+
+#[tauri::command]
+fn set_hotkeys(
+    clip_last_60s: String,
+    clip_last_30s: String,
+    toggle_session_recording: String,
+    screenshot: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    
+    // Validate hotkeys
+    #[cfg(desktop)]
+    {
+        parse_accelerator(&clip_last_60s).map_err(|e| format!("Invalid clip_last_60s: {}", e))?;
+        parse_accelerator(&clip_last_30s).map_err(|e| format!("Invalid clip_last_30s: {}", e))?;
+        parse_accelerator(&toggle_session_recording).map_err(|e| format!("Invalid toggle_session_recording: {}", e))?;
+        parse_accelerator(&screenshot).map_err(|e| format!("Invalid screenshot: {}", e))?;
+    }
+    
+    recorder.settings.hotkeys.clip_last_60s = clip_last_60s;
+    recorder.settings.hotkeys.clip_last_30s = clip_last_30s;
+    recorder.settings.hotkeys.toggle_session_recording = toggle_session_recording;
+    recorder.settings.hotkeys.screenshot = screenshot;
+    
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    
+    // Re-register hotkeys
+    #[cfg(desktop)]
+    {
+        let app_handle = {
+            let runtime_guard = runtime.app_handle.lock().map_err(|e| e.to_string())?;
+            runtime_guard.clone().ok_or("App handle not available")?
+        };
+        register_hotkeys(&app_handle, runtime.inner())?;
+    }
+    
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
 fn main() {
     let (library_root, recorder, database) =
         create_runtime().expect("could not initialize ClipForge runtime");
@@ -1114,53 +1286,30 @@ fn main() {
             capture: Mutex::new(None),
             league_poller: Mutex::new(LeagueLiveClientPoller::default()),
             valve_events: Mutex::new(Vec::new()),
+            hotkey_shortcuts: Mutex::new(None),
+            app_handle: Mutex::new(None),
         })
-        .setup(|app| {
-            start_valve_gsi_receiver(app.handle().clone());
-            start_backend_workers(app.handle().clone());
+.setup(|app| {
+            let handle = app.handle().clone();
+            
+            // Store app handle for hotkey re-registration
+            {
+                let runtime = app.state::<AppRuntime>();
+                let _ = runtime.app_handle.lock().map(|mut guard| {
+                    *guard = Some(handle.clone());
+                });
+            }
+            
+            start_valve_gsi_receiver(handle.clone());
+            start_backend_workers(handle.clone());
+            
+            // Register hotkeys after storing the handle
             #[cfg(desktop)]
             {
-                use tauri_plugin_global_shortcut::{
-                    Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
-                };
-
-                let clip_60 = Shortcut::new(None, Code::F8);
-                let clip_30 = Shortcut::new(Some(Modifiers::SHIFT), Code::F8);
-                let toggle_recording = Shortcut::new(Some(Modifiers::ALT), Code::F7);
-                let handler_clip_60 = clip_60.clone();
-                let handler_clip_30 = clip_30.clone();
-                let handler_toggle_recording = toggle_recording.clone();
-
-                app.handle().plugin(
-                    tauri_plugin_global_shortcut::Builder::new()
-                        .with_handler(move |app, shortcut, event| {
-                            if event.state() != ShortcutState::Pressed {
-                                return;
-                            }
-                            let runtime = app.state::<AppRuntime>();
-                            if shortcut == &handler_clip_60 {
-                                let _ = save_manual_clip_inner(60, runtime.inner());
-                            } else if shortcut == &handler_clip_30 {
-                                let _ = save_manual_clip_inner(30, runtime.inner());
-                            } else if shortcut == &handler_toggle_recording {
-                                let capture_active = runtime
-                                    .capture
-                                    .lock()
-                                    .map(|capture| capture.is_some())
-                                    .unwrap_or(false);
-                                if capture_active {
-                                    let _ = stop_capture_inner(runtime.inner());
-                                } else {
-                                    let _ = start_capture_inner(runtime.inner());
-                                }
-                            }
-                        })
-                        .build(),
-                )?;
-                app.global_shortcut().register(clip_60)?;
-                app.global_shortcut().register(clip_30)?;
-                app.global_shortcut().register(toggle_recording)?;
+                let runtime = app.state::<AppRuntime>();
+                register_hotkeys(&handle, runtime.inner())?;
             }
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1185,7 +1334,8 @@ fn main() {
         trim_clip,
         upload_clip,
         update_clip_metadata,
-        export_clip_copy
+        export_clip_copy,
+        set_hotkeys
         ])
         .run(tauri::generate_context!())
         .expect("error while running ClipForge desktop shell");
@@ -1370,6 +1520,10 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
             .map(|path| ffmpeg_supports_filter(&path, "ddagrab"))
             .unwrap_or(false),
         auto_clip_enabled_events: auto_clip_event_dtos(&recorder.settings),
+        hotkey_clip_last_60s: recorder.settings.hotkeys.clip_last_60s.clone(),
+        hotkey_clip_last_30s: recorder.settings.hotkeys.clip_last_30s.clone(),
+        hotkey_toggle_session_recording: recorder.settings.hotkeys.toggle_session_recording.clone(),
+        hotkey_screenshot: recorder.settings.hotkeys.screenshot.clone(),
     }
 }
 
