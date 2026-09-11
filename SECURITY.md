@@ -12,7 +12,7 @@ We release security updates for the following versions:
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-Instead, please report them via email to: **alvin@zilverstand.com**
+Instead, please report them via email to: **alvin@alvnx.xyz**
 
 You should receive a response within 48 hours. If for some reason you do not, please follow up via email to ensure we received your original message.
 
