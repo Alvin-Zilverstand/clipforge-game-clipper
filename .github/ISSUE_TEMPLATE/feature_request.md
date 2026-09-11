@@ -1,8 +1,10 @@
 ---
 name: Feature Request
-description: Suggest a new feature or enhancement
+about: Feature Request template
 title: "[Feature]: "
-labels: ["enhancement"]
+labels: enhancement
+assignees: Alvin-Zilverstand
+
 ---
 
 ## Feature Description

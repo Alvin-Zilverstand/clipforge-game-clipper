@@ -1,8 +1,10 @@
 ---
 name: Bug Report
-description: Report a bug or unexpected behavior
+about: Bug Report template
 title: "[Bug]: "
-labels: ["bug"]
+labels: bug, enhancement
+assignees: Alvin-Zilverstand
+
 ---
 
 ## Bug Description
