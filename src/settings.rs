@@ -89,6 +89,8 @@ pub struct AppSettings {
     pub auto_clip: AutoClipSettings,
     #[serde(default)]
     pub upload: UploadSettings,
+    #[serde(default)]
+    pub quality_overrides_by_game: BTreeMap<String, QualityPreset>,
 }
 
 impl AppSettings {
@@ -134,7 +136,14 @@ impl AppSettings {
                 enabled_events_by_game: BTreeMap::new(),
             },
             upload: UploadSettings::default(),
+            quality_overrides_by_game: BTreeMap::new(),
         }
+    }
+
+    pub fn effective_quality_for(&self, game_id: &str) -> &QualityPreset {
+        self.quality_overrides_by_game
+            .get(game_id)
+            .unwrap_or(&self.quality)
     }
 
     pub fn clamp_replay_buffer(&mut self) {
@@ -216,6 +225,36 @@ mod tests {
 
         assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(loaded.replay_buffer, Duration::from_secs(120));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn quality_overrides_round_trip_and_apply_per_game() {
+        let root = std::env::temp_dir().join(format!(
+            "clipforge-settings-overrides-{}",
+            SystemTimeCompat::millis()
+        ));
+        let mut settings = AppSettings::default_for_root(&root);
+        settings.quality_overrides_by_game.insert(
+            "counter-strike-2".to_string(),
+            QualityPreset {
+                name: "Competitive 1080p60".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 60,
+                bitrate_kbps: 12_000,
+            },
+        );
+
+        save_settings(&root, &settings).expect("save");
+        let loaded = load_or_create_settings(&root).expect("load");
+
+        let override_quality = loaded
+            .effective_quality_for("counter-strike-2");
+        assert_eq!(override_quality.width, 1920);
+        assert_eq!(override_quality.fps, 60);
+        assert_eq!(loaded.effective_quality_for("league-of-leagues").width, 1280);
+        assert!(loaded.quality_overrides_by_game.contains_key("counter-strike-2"));
         let _ = fs::remove_dir_all(root);
     }
 

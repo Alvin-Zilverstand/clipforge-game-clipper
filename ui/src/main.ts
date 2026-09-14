@@ -81,6 +81,8 @@ type DesktopStatus = {
   storage_limit_gb: number;
   excluded_window_titles: string[];
   separate_audio_tracks: boolean;
+  game_quality_overrides: GameQualityOverrideDto[];
+  effective_quality_applied: boolean;
   app_version: string;
 };
 
@@ -127,6 +129,15 @@ type UpdateInfo = {
   downloadUrl: string;
   message: string;
   applying: boolean;
+};
+
+type GameQualityOverrideDto = {
+  game_id: string;
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+  bitrate_kbps: number;
 };
 
 type AppState = {
@@ -177,6 +188,8 @@ type AppState = {
   excludedWindowText: string;
   separateAudioTracks: boolean;
   appVersion: string;
+  gameQualityOverrides: GameQualityOverrideDto[];
+  effectiveQualityApplied: boolean;
   update: UpdateInfo;
 };
 
@@ -262,6 +275,8 @@ const state: AppState = {
   excludedWindowText: "",
   separateAudioTracks: false,
   appVersion: "0.1.0",
+  gameQualityOverrides: [],
+  effectiveQualityApplied: false,
   update: {
     checked: false,
     updateAvailable: false,
@@ -522,6 +537,16 @@ function renderClipDetails(clip: Clip | undefined) {
 }
 
 function renderRecordingView() {
+  const override = state.gameQualityOverrides.find((candidate) => candidate.game_id === state.detectedGame) ?? null;
+  const baseResolution = state.captureResolution || "1280x720";
+  const overrideResolution = override ? `${override.width}x${override.height}` : baseResolution;
+  const presetOptions = ["1280x720", "1920x1080", "2560x1440", "3840x2160"];
+  const resolutionOptions = presetOptions.includes(overrideResolution)
+    ? presetOptions
+    : [overrideResolution, ...presetOptions];
+  const fpsOptions = [30, 60, 120];
+  const overrideFps = override?.fps ?? state.captureFps;
+  const overrideBitrate = override?.bitrate_kbps ?? state.captureBitrateKbps;
   return `
     <section class="settings-grid">
       <article class="settings-panel">
@@ -531,13 +556,38 @@ function renderRecordingView() {
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Capture</p>
-        <h2>720p30 Performance</h2>
+        <h2>${escapeHtml(state.captureResolution)} @ ${state.captureFps} fps</h2>
+        <p class="muted">${state.effectiveQualityApplied ? `A quality override is active for ${escapeHtml(state.detectedGame)}.` : "Using the global quality settings."}</p>
         <p class="muted">Lightweight desktop capture uses bundled FFmpeg when system FFmpeg is missing.</p>
         <p class="muted">${state.desktopDuplicationAvailable ? "Desktop Duplication capture available" : "Using GDI capture fallback"}</p>
         <p class="muted">${state.captureBackend ? `Active backend: ${state.captureBackend}` : "Active backend: idle"}</p>
         <p class="muted">${state.ffmpegAvailable ? "FFmpeg ready" : "FFmpeg missing"}${state.ffmpegPath ? ` · ${state.ffmpegPath}` : ""}</p>
         <p class="muted">${state.capturePath ? `Writing ${state.capturePath}` : "No active capture file"}</p>
         <p class="muted">${state.freeDiskGb > 0 ? `${state.freeDiskGb.toFixed(1)} GB free on recording drive` : "Disk space unknown"}</p>
+      </article>
+      <article class="settings-panel">
+        <p class="eyebrow">Quality override</p>
+        <h2>Per-game capture settings</h2>
+        ${state.detectedGame === "Waiting for game" ? `
+          <p class="muted">Start a supported game and you can give it its own resolution, FPS, and bitrate here.</p>
+        ` : `
+          <p class="muted">Override quality for ${escapeHtml(state.detectedGame)}${override ? ` (currently ${override.width}x${override.height} @ ${override.fps} fps)` : ""}.</p>
+          <div class="field-row">
+            <label>Resolution
+              <select data-action="override-preset">
+                ${resolutionOptions.map((option) => `<option value="${option}" ${option === overrideResolution ? "selected" : ""}>${option}</option>`).join("")}
+              </select>
+            </label>
+            <label>FPS
+              <select data-action="override-fps">
+                ${fpsOptions.map((option) => `<option value="${option}" ${option === overrideFps ? "selected" : ""}>${option} fps</option>`).join("")}
+              </select>
+            </label>
+          </div>
+          <label>Bitrate (kbps) <input type="number" min="500" max="50000" step="500" value="${overrideBitrate}" data-action="override-bitrate" /></label>
+          <button data-action="save-override">Save override for ${escapeHtml(state.detectedGame)}</button>
+          <button data-action="clear-override" ${override ? "" : "disabled"}>Revert to global settings</button>
+        `}
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Audio</p>
@@ -948,6 +998,14 @@ function bindEvents() {
     void checkForUpdates();
   });
 
+  appRoot.querySelector<HTMLButtonElement>("[data-action='save-override']")?.addEventListener("click", () => {
+    void saveGameQualityOverride();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='clear-override']")?.addEventListener("click", () => {
+    void clearGameQualityOverride();
+  });
+
   appRoot.querySelector<HTMLButtonElement>("[data-action='download-update']")?.addEventListener("click", () => {
     void downloadUpdate();
   });
@@ -1240,8 +1298,10 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.storageLimitGb = status.storage_limit_gb;
   state.excludedWindowTitles = status.excluded_window_titles ?? [];
   state.excludedWindowText = (status.excluded_window_titles ?? []).join(", ");
-  state.separateAudioTracks = status.separate_audio_tracks ?? false;
+state.separateAudioTracks = status.separate_audio_tracks ?? false;
   state.appVersion = status.app_version ?? state.appVersion;
+  state.gameQualityOverrides = status.game_quality_overrides ?? [];
+  state.effectiveQualityApplied = status.effective_quality_applied ?? false;
 }
 
 async function trimSelectedClip() {
@@ -1639,6 +1699,59 @@ function parseResolution(value: string): [number, number] {
     Number.isFinite(width) ? width : 1280,
     Number.isFinite(height) ? height : 720,
   ];
+}
+
+async function saveGameQualityOverride() {
+  if (!tauriInvoke) {
+    return;
+  }
+  if (state.detectedGame === "Waiting for game") {
+    return;
+  }
+
+  const preset =
+    appRoot.querySelector<HTMLSelectElement>("[data-action='override-preset']")?.value ?? "1280x720";
+  const fps = Number(appRoot.querySelector<HTMLSelectElement>("[data-action='override-fps']")?.value ?? 30);
+  const bitrate = Number(appRoot.querySelector<HTMLInputElement>("[data-action='override-bitrate']")?.value ?? 6000);
+  const [width, height] = parseResolution(preset);
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_game_quality_override", {
+      gameId: state.detectedGame,
+      name: `${preset} ${fps}fps`,
+      width,
+      height,
+      fps,
+      bitrateKbps: bitrate,
+    });
+    applyDesktopStatus(status);
+    showNotice(`Quality override saved for ${state.detectedGame}.`);
+    render();
+  } catch (error) {
+    console.warn("Could not save quality override", error);
+    showNotice(`Could not save quality override: ${String(error)}`);
+  }
+}
+
+async function clearGameQualityOverride() {
+  if (!tauriInvoke) {
+    return;
+  }
+  if (state.detectedGame === "Waiting for game") {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("clear_game_quality_override", {
+      gameId: state.detectedGame,
+    });
+    applyDesktopStatus(status);
+    showNotice(`Quality override cleared for ${state.detectedGame}.`);
+    render();
+  } catch (error) {
+    console.warn("Could not clear quality override", error);
+    showNotice(`Could not clear quality override: ${String(error)}`);
+  }
 }
 
 async function checkForUpdates() {

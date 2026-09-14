@@ -129,7 +129,19 @@ struct DesktopStatus {
     storage_limit_gb: u64,
     excluded_window_titles: Vec<String>,
     separate_audio_tracks: bool,
+    game_quality_overrides: Vec<GameQualityOverrideDto>,
+    effective_quality_applied: bool,
     app_version: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GameQualityOverrideDto {
+    game_id: String,
+    name: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -663,6 +675,11 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     }
     recorder.toggle_session_recording();
 
+    let game_id = recorder.state.detected_game_id.clone().unwrap_or_default();
+    let quality = recorder
+        .settings
+        .effective_quality_for(&game_id)
+        .clone();
     let session_id = recorder
         .state
         .active_session_id
@@ -698,10 +715,10 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let config = CaptureConfig {
         source,
         method,
-        width: recorder.settings.quality.width,
-        height: recorder.settings.quality.height,
-        fps: recorder.settings.quality.fps,
-        bitrate_kbps: recorder.settings.quality.bitrate_kbps,
+        width: quality.width,
+        height: quality.height,
+        fps: quality.fps,
+        bitrate_kbps: quality.bitrate_kbps,
         encoder: EncoderPreference::HardwareH264,
         system_audio_enabled,
         mic_enabled: recorder.settings.privacy.mic_enabled,
@@ -1573,6 +1590,8 @@ fn main() {
             reveal_screenshot,
             reveal_crash_logs,
             list_crash_logs,
+            set_game_quality_override,
+            clear_game_quality_override,
             check_for_updates,
             download_and_apply_update,
             set_hotkeys
@@ -1778,6 +1797,8 @@ fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
 }
 
 fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
+    let game_id = recorder.state.detected_game_id.clone().unwrap_or_default();
+    let quality = recorder.settings.effective_quality_for(&game_id).clone();
     DesktopStatus {
         recording_state: recording_status_name(&recorder.state.status).to_string(),
         detected_game: recorder.state.detected_game_id.clone(),
@@ -1820,17 +1841,80 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         hotkey_toggle_session_recording: recorder.settings.hotkeys.toggle_session_recording.clone(),
         hotkey_screenshot: recorder.settings.hotkeys.screenshot.clone(),
         free_disk_gb: clipforge::storage::check_storage_space(&recorder.paths.buffer_root).free_gb(),
-        capture_fps: recorder.settings.quality.fps,
-        capture_bitrate_kbps: recorder.settings.quality.bitrate_kbps,
-        capture_resolution: format!(
-            "{}x{}",
-            recorder.settings.quality.width, recorder.settings.quality.height
-        ),
+        capture_fps: quality.fps,
+        capture_bitrate_kbps: quality.bitrate_kbps,
+        capture_resolution: format!("{}x{}", quality.width, quality.height),
         storage_limit_gb: recorder.settings.storage_limit_gb,
         excluded_window_titles: recorder.settings.privacy.excluded_window_titles.clone(),
         separate_audio_tracks: recorder.settings.privacy.separate_audio_tracks,
+        game_quality_overrides: quality_override_dtos(&recorder.settings),
+        effective_quality_applied: game_override_is_active(&recorder.settings, &game_id),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     }
+}
+
+fn quality_override_dtos(settings: &AppSettings) -> Vec<GameQualityOverrideDto> {
+    settings
+        .quality_overrides_by_game
+        .iter()
+        .map(|(game_id, preset)| GameQualityOverrideDto {
+            game_id: game_id.clone(),
+            name: preset.name.clone(),
+            width: preset.width,
+            height: preset.height,
+            fps: preset.fps,
+            bitrate_kbps: preset.bitrate_kbps,
+        })
+        .collect()
+}
+
+fn game_override_is_active(settings: &AppSettings, game_id: &str) -> bool {
+    settings.quality_overrides_by_game.contains_key(game_id)
+}
+
+#[tauri::command]
+fn set_game_quality_override(
+    game_id: String,
+    name: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    let preset = clipforge::settings::QualityPreset {
+        name: if name.trim().is_empty() {
+            "Custom".to_string()
+        } else {
+            name.trim().to_string()
+        },
+        width: even_between(width, 640, 7680),
+        height: even_between(height, 360, 4320),
+        fps: fps.clamp(15, 240),
+        bitrate_kbps: bitrate_kbps.clamp(500, 50_000),
+    };
+    recorder
+        .settings
+        .quality_overrides_by_game
+        .insert(game_id, preset);
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save quality override: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn clear_game_quality_override(
+    game_id: String,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.quality_overrides_by_game.remove(&game_id);
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save quality override: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
 }
 
 fn clip_to_dto(clip: &Clip) -> ClipDto {

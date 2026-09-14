@@ -42,9 +42,13 @@
 - Panic reporting writes crash reports with stack traces to the logs folder (`library/logs`), prunes old entries, and the Settings screen can open the logs folder.
 - Native Windows Graphics Capture now downscales the captured window/monitor to the configured resolution cap (e.g. 720p) with even dimensions while preserving aspect ratio; covered by unit tests.
 - Capture quality and storage settings are exposed: the Settings screen can change resolution, FPS, bitrate, buffer storage cap, excluded window titles, and the separate-audio-tracks toggle via the `set_capture_settings` command, and current values are shown in DesktopStatus.
+- Per-game capture quality overrides can be set from the Recording screen per detected game title, saved in settings, and applied automatically by the recorder when that game is active.
 - The configured storage cap is enforced by a backend worker that prunes the oldest rolling buffer segments once the buffer exceeds `storage_limit_gb`.
 - SQLite schema uses versioned migrations tracked via `PRAGMA user_version`; legacy databases (missing tables or the `title` column) are repaired and upgraded in place, with migration tests.
+- Valve GSI event mapping enriches CS2 round, bomb, and match-start events with round number, map scores, and plant-region metadata; these events are unit tested against realistic JSON payloads.
+- A GitHub Actions release workflow (`.github/workflows/release.yml`) builds MSI and NSIS installers on tag push or manual dispatch and publishes them to a GitHub Release, ready for the auto-updater to pick up.
 - Auto-update checks the GitHub repo releases (`Alvin-Zilverstand/clipforge-game-clipper`) for the latest MSI/NSIS installer, compares it against the running version, downloads it to temp, launches the installer, and exits the app to finish; version comparison, asset selection, and parsing are unit tested plus one ignored live test against the GitHub API.
+- A GitHub Actions release workflow publishes MSI/NSIS assets on tag push; auto-update will pick up newer releases automatically once the repo ships a tag newer than the running app version.
 - The Settings screen shows the current version, checks for updates, and offers a Download & install button when a newer release exists.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
@@ -54,9 +58,8 @@
 
 - Native Windows Graphics Capture and FFmpeg capture finalization have not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
 - Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work (the separate-audio-tracks setting is stored but not yet honored by the encoder).
-- Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen, but richer event mapping per game is still needed.
+- Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen. CS2 event mapping is now enriched with round, bomb, and match-start metadata, but full per-game mapping for Dota 2 and other Source titles is still needed.
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
-- Per-game capture quality overrides are still incomplete.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
 - Installer onboarding is still not implemented.
 - Auto-update requires a GitHub release whose tag is newer than the running app version and that ships MSI/NSIS assets (the existing `v0.0.1` release carries 0.1.0 assets, so it correctly reports up to date).
@@ -64,8 +67,7 @@
 ## Next Engineering Steps
 
 1. Honor the separate-audio-tracks setting by encoding system and mic audio to distinct tracks, and consider per-process loopback capture.
-2. Expand CS2/Dota GSI event mapping beyond the current MVP event parser.
-3. Add per-game capture quality overrides.
-4. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
-5. Automate building and publishing GitHub releases (e.g. a GitHub Action that runs Tauri + uploads MSI/NSIS assets) so the updater has fresh assets to install.
-6. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.
+2. Add full per-game Valve GSI event mapping for Dota 2 and other Source titles beyond the current CS2 enrichment.
+3. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
+4. Exercise the GitHub Actions release workflow with a real tag push and verify the published assets appear in a GitHub Release.
+5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.

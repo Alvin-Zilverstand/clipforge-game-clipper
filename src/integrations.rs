@@ -194,6 +194,10 @@ pub fn valve_gsi_raw_events(
     let mut events = Vec::new();
 
     // Round events
+    let round_number = value
+        .pointer("/map/round")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
     if let Some(round_phase) = value
         .pointer("/round/phase")
         .and_then(Value::as_str)
@@ -206,7 +210,19 @@ pub fn valve_gsi_raw_events(
                         name: "round_win".to_string(),
                         timestamp: now,
                         player: None,
-                        metadata: [("win_team".to_string(), win_team.to_string())].into(),
+                        metadata: [
+                            ("win_team".to_string(), win_team.to_string()),
+                            ("round".to_string(), round_number.to_string()),
+                            (
+                                "ct_score".to_string(),
+                                map_stat_string(&value, "/map/team_ct/score"),
+                            ),
+                            (
+                                "t_score".to_string(),
+                                map_stat_string(&value, "/map/team_t/score"),
+                            ),
+                        ]
+                        .into(),
                     });
                 }
             }
@@ -216,11 +232,33 @@ pub fn valve_gsi_raw_events(
                     name: "round_start".to_string(),
                     timestamp: now,
                     player: None,
-                    metadata: BTreeMap::new(),
+                    metadata: [("round".to_string(), round_number.to_string())].into(),
                 });
             }
             "live" => {
-                // Round is live, could track bomb events
+                // Round is live, could track bomb events. A fresh match is live on round 1.
+                if round_number == 1 {
+                    events.push(RawGameEvent {
+                        event_id: format!("match_start:{}", millis(now)),
+                        name: "match_start".to_string(),
+                        timestamp: now,
+                        player: value
+                            .pointer("/player/name")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                        metadata: [
+                            (
+                                "map".to_string(),
+                                map_stat_string(&value, "/map/name"),
+                            ),
+                            (
+                                "mode".to_string(),
+                                map_stat_string(&value, "/map/mode"),
+                            ),
+                        ]
+                        .into(),
+                    });
+                }
             }
             _ => {}
         }
@@ -228,6 +266,15 @@ pub fn valve_gsi_raw_events(
 
     // Bomb events (CS2)
     if let Some(bomb_state) = value.pointer("/round/bomb").and_then(Value::as_str) {
+        let bomb_region = map_stat_string(&value, "/map/region");
+        let bomb_metadata = |region: String| {
+            let mut metadata = BTreeMap::new();
+            metadata.insert("round".to_string(), round_number.to_string());
+            if !region.is_empty() {
+                metadata.insert("region".to_string(), region);
+            }
+            metadata
+        };
         match bomb_state {
             "planted" => {
                 events.push(RawGameEvent {
@@ -238,7 +285,7 @@ pub fn valve_gsi_raw_events(
                         .pointer("/player/name")
                         .and_then(Value::as_str)
                         .map(ToString::to_string),
-                    metadata: BTreeMap::new(),
+                    metadata: bomb_metadata(bomb_region),
                 });
             }
             "defused" => {
@@ -250,7 +297,7 @@ pub fn valve_gsi_raw_events(
                         .pointer("/player/name")
                         .and_then(Value::as_str)
                         .map(ToString::to_string),
-                    metadata: BTreeMap::new(),
+                    metadata: bomb_metadata(bomb_region),
                 });
             }
             "exploded" => {
@@ -259,7 +306,7 @@ pub fn valve_gsi_raw_events(
                     name: "bomb_exploded".to_string(),
                     timestamp: now,
                     player: None,
-                    metadata: BTreeMap::new(),
+                    metadata: bomb_metadata(bomb_region),
                 });
             }
             _ => {}
@@ -432,6 +479,18 @@ fn millis(time: SystemTime) -> u128 {
         .as_millis()
 }
 
+fn map_stat_string(value: &Value, pointer: &str) -> String {
+    match value.pointer(pointer) {
+        Some(inner) => inner
+            .as_str()
+            .map(ToString::to_string)
+            .or_else(|| inner.as_u64().map(|n| n.to_string()))
+            .or_else(|| inner.as_i64().map(|n| n.to_string()))
+            .unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +544,85 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].name, "triple_kill");
         assert_eq!(events[0].player.as_deref(), Some("Alvin"));
+    }
+
+    #[test]
+    fn parses_valve_gsi_round_metadata_and_match_start() {
+        let body = r#"{
+            "round": {"phase": "over", "win_team": "CT"},
+            "map": {
+                "round": 5,
+                "phase": "live",
+                "name": "de_mirage",
+                "mode": "competitive",
+                "team_ct": {"score": 3},
+                "team_t": {"score": 2}
+            }
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        let round_win = events
+            .iter()
+            .find(|event| event.name == "round_win")
+            .expect("round win event");
+        assert_eq!(round_win.metadata.get("win_team").map(String::as_str), Some("CT"));
+        assert_eq!(round_win.metadata.get("round").map(String::as_str), Some("5"));
+        assert_eq!(
+            round_win.metadata.get("ct_score").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            round_win.metadata.get("t_score").map(String::as_str),
+            Some("2")
+        );
+        assert!(!events.iter().any(|event| event.name == "match_start"));
+    }
+
+    #[test]
+    fn parses_valve_gsi_match_start_on_fresh_live_round() {
+        let body = r#"{
+            "round": {"phase": "live"},
+            "map": {"round": 1, "phase": "live", "name": "de_inferno", "mode": "casual"},
+            "player": {"name": "Alvin"}
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        let match_start = events
+            .iter()
+            .find(|event| event.name == "match_start")
+            .expect("match start event");
+        assert_eq!(match_start.player.as_deref(), Some("Alvin"));
+        assert_eq!(
+            match_start.metadata.get("map").map(String::as_str),
+            Some("de_inferno")
+        );
+        assert_eq!(
+            match_start.metadata.get("mode").map(String::as_str),
+            Some("casual")
+        );
+    }
+
+    #[test]
+    fn parses_valve_gsi_bomb_plant_region() {
+        let body = r#"{
+            "round": {"phase": "live", "bomb": "planted"},
+            "map": {"round": 2, "region": "b"},
+            "player": {"name": "Alvin"}
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        let bomb = events
+            .iter()
+            .find(|event| event.name == "bomb_planted")
+            .expect("bomb planted event");
+        assert_eq!(bomb.player.as_deref(), Some("Alvin"));
+        assert_eq!(
+            bomb.metadata.get("region").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(bomb.metadata.get("round").map(String::as_str), Some("2"));
     }
 }
