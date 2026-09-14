@@ -74,6 +74,7 @@ type DesktopStatus = {
   hotkey_clip_last_30s: string;
   hotkey_toggle_session_recording: string;
   hotkey_screenshot: string;
+  free_disk_gb: number;
 };
 
 type ClipDto = {
@@ -89,6 +90,16 @@ type ClipDto = {
   thumbnail_path: string | null;
   tags: string[];
   color_class: string;
+};
+
+type UploadHistoryEntry = {
+  id: number;
+  clip_id: string;
+  provider: string;
+  status: string;
+  url: string | null;
+  error: string | null;
+  attempted_at: string;
 };
 
 type GsiConfigDto = {
@@ -134,11 +145,13 @@ type AppState = {
   selectedClipId: string;
   clips: Clip[];
   screenshots: string[];
+  uploadHistory: UploadHistoryEntry[];
   autoEvents: AutoEvent[];
   hotkeyClipLast60s: string;
   hotkeyClipLast30s: string;
   hotkeyToggleRecording: string;
   hotkeyScreenshot: string;
+  freeDiskGb: number;
 };
 
 type TauriGlobal = {
@@ -188,8 +201,9 @@ const state: AppState = {
    notice: "",
    selectedClipId: "",
    clips: [],
-   screenshots: [],
-   autoEvents: [
+    screenshots: [],
+    uploadHistory: [],
+    autoEvents: [
     { id: "cs2-kill", gameId: "counter-strike-2", eventType: "kill", game: "Counter-Strike 2", event: "Kill", enabled: true },
     { id: "cs2-death", gameId: "counter-strike-2", eventType: "death", game: "Counter-Strike 2", event: "Death", enabled: true },
     { id: "cs2-round", gameId: "counter-strike-2", eventType: "round_win", game: "Counter-Strike 2", event: "Round win", enabled: true },
@@ -213,6 +227,7 @@ const state: AppState = {
   hotkeyClipLast30s: "Shift+F8",
   hotkeyToggleRecording: "Alt+F7",
   hotkeyScreenshot: "F9",
+  freeDiskGb: 0,
 };
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -254,11 +269,14 @@ function render() {
 }
 
 function renderRecordingBar() {
-  const statusText = state.captureActive
-    ? "Recording to disk"
-    : state.sessionRecording
-      ? "Recording session"
-      : `${state.recordingState} ${state.replayBufferSeconds}s`;
+  const lowDisk = state.freeDiskGb < 2 && state.freeDiskGb > 0;
+  const statusText = lowDisk
+    ? `Low disk (${state.freeDiskGb.toFixed(1)} GB free)`
+    : state.captureActive
+      ? "Recording to disk"
+      : state.sessionRecording
+        ? "Recording session"
+        : `${state.recordingState} ${state.replayBufferSeconds}s`;
   return `
     <header class="recording-bar">
       <div>
@@ -269,9 +287,9 @@ function renderRecordingBar() {
         <span class="meter"><i style="width: 72%"></i></span>
         <span class="meter"><i style="width: ${state.micEnabled ? 34 : 0}%"></i></span>
       </div>
-      <div class="status-pill">${statusText}</div>
-      <button class="icon-button" data-action="clip">Clip</button>
-      <button class="icon-button" data-action="screenshot">Screenshot</button>
+      <div class="status-pill ${lowDisk ? "warn" : ""}">${statusText}</div>
+      ${lowDisk ? "" : `<button class="icon-button" data-action="clip">Clip</button>`}
+      ${lowDisk ? "" : `<button class="icon-button" data-action="screenshot">Screenshot</button>`}
       <button class="record-button" data-action="toggle-record">${state.captureActive || state.sessionRecording ? "Stop" : "Record"}</button>
     </header>
   `;
@@ -476,6 +494,7 @@ function renderRecordingView() {
         <p class="muted">${state.captureBackend ? `Active backend: ${state.captureBackend}` : "Active backend: idle"}</p>
         <p class="muted">${state.ffmpegAvailable ? "FFmpeg ready" : "FFmpeg missing"}${state.ffmpegPath ? ` · ${state.ffmpegPath}` : ""}</p>
         <p class="muted">${state.capturePath ? `Writing ${state.capturePath}` : "No active capture file"}</p>
+        <p class="muted">${state.freeDiskGb > 0 ? `${state.freeDiskGb.toFixed(1)} GB free on recording drive` : "Disk space unknown"}</p>
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Audio</p>
@@ -574,6 +593,36 @@ function renderUploadsView() {
         <label>Headers <textarea data-action="custom-upload-headers">${escapeHtml(state.customUploadHeaders)}</textarea></label>
       </article>
     </section>
+    <section class="table-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Upload history</p>
+          <h2>Recent Uploads</h2>
+        </div>
+        <button data-action="refresh-upload-history">Refresh</button>
+      </div>
+      ${state.uploadHistory.length > 0
+        ? `<div class="upload-history">${state.uploadHistory.map(renderUploadHistoryRow).join("")}</div>`
+        : `<p class="muted">No upload attempts recorded yet.</p>`}
+    </section>
+  `;
+}
+
+function renderUploadHistoryRow(entry: UploadHistoryEntry) {
+  const failed = entry.status === "failed";
+  const uploaded = entry.status === "uploaded";
+  return `
+    <div class="upload-row ${failed ? "failed" : uploaded ? "uploaded" : ""}">
+      <div class="upload-row-main">
+        <strong>${escapeHtml(entry.provider)}</strong>
+        <span class="muted">${escapeHtml(entry.clip_id)}</span>
+        <span class="status-pill">${escapeHtml(entry.status)}</span>
+        ${entry.url ? `<a class="muted" href="${escapeHtml(entry.url)}" target="_blank" rel="noreferrer">${escapeHtml(entry.url)}</a>` : ""}
+        ${entry.error ? `<p class="muted">${escapeHtml(entry.error)}</p>` : ""}
+        <p class="muted">${escapeHtml(entry.attempted_at)}</p>
+      </div>
+      ${failed ? `<button data-action="retry-upload" data-clip-id="${escapeHtml(entry.clip_id)}">Retry</button>` : ""}
+    </div>
   `;
 }
 
@@ -786,6 +835,22 @@ function bindEvents() {
       const path = button.dataset.screenshotPath;
       if (path) {
         void revealScreenshot(path);
+      }
+    });
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='refresh-upload-history']")?.addEventListener("click", () => {
+    void refreshUploadHistory().then(() => render());
+  });
+
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-action='retry-upload']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const clipId = button.dataset.clipId;
+      if (clipId) {
+        const entry = state.uploadHistory.find((e) => e.clip_id === clipId);
+        if (entry) {
+          void retryUpload(entry);
+        }
       }
     });
   });
@@ -1042,6 +1107,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.hotkeyClipLast30s = status.hotkey_clip_last_30s;
   state.hotkeyToggleRecording = status.hotkey_toggle_session_recording;
   state.hotkeyScreenshot = status.hotkey_screenshot;
+  state.freeDiskGb = status.free_disk_gb;
 }
 
 async function trimSelectedClip() {
@@ -1140,6 +1206,7 @@ async function uploadSelectedClip() {
     });
     const updated = clipFromDto(dto);
     state.clips = state.clips.map((clip) => (clip.id === updated.id ? updated : clip));
+    await refreshUploadHistory();
     showNotice("Clip uploaded");
     render();
   } catch (error) {
@@ -1427,8 +1494,30 @@ async function listScreenshots() {
 }
 
 async function refreshScreenshots() {
-   const screenshots = await listScreenshots();
-   state.screenshots = screenshots;
+    const screenshots = await listScreenshots();
+    state.screenshots = screenshots;
+}
+
+async function refreshUploadHistory() {
+    if (!tauriInvoke) return;
+    try {
+        state.uploadHistory = await tauriInvoke<UploadHistoryEntry[]>("list_upload_history");
+    } catch (error) {
+        console.warn("Could not load upload history", error);
+    }
+}
+
+async function retryUpload(entry: UploadHistoryEntry) {
+    if (!tauriInvoke) return;
+    const clip = state.clips.find((c) => c.id === entry.clip_id);
+    if (!clip) {
+        showNotice(`Clip ${entry.clip_id} not found in library`);
+        return;
+    }
+    state.selectedClipId = clip.id;
+    state.activeView = "Library";
+    render();
+    await uploadSelectedClip();
 }
 
 function filteredClips() {
@@ -1517,6 +1606,7 @@ async function loadDesktopBridge() {
     state.clips = clips.map(clipFromDto);
     state.selectedClipId = state.clips[0]?.id ?? "";
     await refreshScreenshots();
+    await refreshUploadHistory();
     render();
     await refreshAudioDevices();
     window.setInterval(() => {

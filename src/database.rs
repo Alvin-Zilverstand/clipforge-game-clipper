@@ -1,4 +1,4 @@
-use crate::models::{Clip, ClipSource, GameEventType, UploadProvider};
+use crate::models::{Clip, ClipSource, GameEventType, UploadHistoryEntry, UploadProvider};
 use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -176,6 +176,31 @@ impl ClipDatabase {
         Ok(())
     }
 
+    pub fn load_upload_history(&self) -> rusqlite::Result<Vec<UploadHistoryEntry>> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT id, clip_id, provider, status, url, error, attempted_at_ms
+            FROM upload_history
+            ORDER BY attempted_at_ms DESC
+            LIMIT 200
+            ",
+        )?;
+
+        let rows = statement.query_map([], |row| {
+            Ok(UploadHistoryEntry {
+                id: row.get(0)?,
+                clip_id: row.get(1)?,
+                provider: row.get(2)?,
+                status: row.get(3)?,
+                url: row.get(4)?,
+                error: row.get(5)?,
+                attempted_at: millis_to_system_time(row.get(6)?),
+            })
+        })?;
+
+        rows.collect()
+    }
+
     fn column_exists(&self, table: &str, column: &str) -> rusqlite::Result<bool> {
         let mut statement = self
             .connection
@@ -293,6 +318,9 @@ mod tests {
                 SystemTime::now(),
             )
             .expect("upload history");
+        let history = database.load_upload_history().expect("load upload history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].clip_id, "clip-1");
         database.delete_clip("clip-1").expect("delete");
         assert!(database.load_clips().expect("load empty").is_empty());
         let _ = std::fs::remove_file(db_path);

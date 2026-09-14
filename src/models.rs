@@ -112,6 +112,17 @@ pub struct Clip {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadHistoryEntry {
+    pub id: i64,
+    pub clip_id: String,
+    pub provider: String,
+    pub status: String,
+    pub url: Option<String>,
+    pub error: Option<String>,
+    pub attempted_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingStatus {
     WaitingForGame,
     Buffering,

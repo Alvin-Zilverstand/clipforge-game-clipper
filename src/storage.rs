@@ -114,6 +114,69 @@ pub struct StorageCleanupReport {
     pub remaining_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageLevel {
+    Ok,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageSpace {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+    pub level: StorageLevel,
+}
+
+impl StorageSpace {
+    pub fn free_gb(&self) -> f64 {
+        self.available_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    }
+}
+
+pub fn check_storage_space(root: &Path) -> StorageSpace {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let mount = disks
+        .list()
+        .iter()
+        .find(|disk| path_is_on_mount(root, disk.mount_point()))
+        .or_else(|| disks.list().first());
+    let valid = |disk: Option<&sysinfo::Disk>| -> Option<(u64, u64)> {
+        disk.map(|disk| (disk.total_space(), disk.available_space()))
+    };
+    let (total, available) = valid(mount).unwrap_or((0, 0));
+    let warning_at = bytes_for_gb(5);
+    let critical_at = bytes_for_gb(2);
+    let level = if available < critical_at {
+        StorageLevel::Critical
+    } else if available < warning_at {
+        StorageLevel::Warning
+    } else {
+        StorageLevel::Ok
+    };
+    StorageSpace {
+        total_bytes: total,
+        available_bytes: available,
+        level,
+    }
+}
+
+fn bytes_for_gb(gb: u64) -> u64 {
+    gb * 1024 * 1024 * 1024
+}
+
+fn path_is_on_mount(path: &Path, mount: &Path) -> bool {
+    let path = path
+        .to_str()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mount = mount
+        .to_str()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    path == mount || path.starts_with(&mount)
+}
+
 pub fn cleanup_oldest_files_until_under_limit(
     root: &Path,
     max_bytes: u64,
@@ -205,5 +268,28 @@ mod tests {
         assert_eq!(report.deleted_files, 1);
         assert_eq!(report.remaining_bytes, 10);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn storage_space_reports_metrics_for_root() {
+        let root = env::temp_dir();
+        let space = check_storage_space(&root);
+        assert!(space.total_bytes > 0);
+        assert!(space.available_bytes <= space.total_bytes);
+    }
+
+    #[test]
+    fn path_is_on_mount_matches_drive_prefix() {
+        let root = if cfg!(windows) {
+            Path::new("C:/Users/ClipForge/Clips")
+        } else {
+            Path::new("/home/clipforge/clips")
+        };
+        let mount = if cfg!(windows) {
+            Path::new("C:")
+        } else {
+            Path::new("/home")
+        };
+        assert!(path_is_on_mount(root, mount));
     }
 }

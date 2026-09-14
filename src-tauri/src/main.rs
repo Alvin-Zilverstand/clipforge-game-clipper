@@ -121,6 +121,7 @@ struct DesktopStatus {
     hotkey_clip_last_30s: String,
     hotkey_toggle_session_recording: String,
     hotkey_screenshot: String,
+    free_disk_gb: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +138,17 @@ struct ClipDto {
     thumbnail_path: Option<String>,
     tags: Vec<String>,
     color_class: String,
+}
+
+#[derive(Debug, Serialize)]
+struct UploadHistoryDto {
+    id: i64,
+    clip_id: String,
+    provider: String,
+    status: String,
+    url: Option<String>,
+    error: Option<String>,
+    attempted_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -589,6 +601,14 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         return Ok(status_from_recorder(&recorder, capture.as_ref()));
     }
 
+    let storage = clipforge::storage::check_storage_space(&recorder.paths.buffer_root);
+    if let clipforge::storage::StorageLevel::Critical = storage.level {
+        return Err(format!(
+            "Recording blocked: only {:.1} GB of disk space remains. Free at least 2 GB before recording.",
+            storage.free_gb()
+        ));
+    }
+
     let ffmpeg = find_ffmpeg_executable()
         .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
     let now = SystemTime::now();
@@ -900,6 +920,29 @@ fn upload_clip(
     persist_clip(runtime.inner(), &clip)?;
     save_manifest(&recorder)?;
     Ok(clip_to_dto(&clip))
+}
+
+#[tauri::command]
+fn list_upload_history(runtime: State<'_, AppRuntime>) -> Result<Vec<UploadHistoryDto>, String> {
+    let database = runtime.database.lock().map_err(|error| error.to_string())?;
+    Ok(database
+        .load_upload_history()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| UploadHistoryDto {
+            id: entry.id,
+            clip_id: entry.clip_id,
+            provider: entry.provider,
+            status: entry.status,
+            url: entry.url,
+            error: entry.error,
+            attempted_at: format_upload_time(entry.attempted_at),
+        })
+        .collect())
+}
+
+fn format_upload_time(time: SystemTime) -> String {
+    format_system_time(time)
 }
 
 #[tauri::command]
@@ -1385,6 +1428,7 @@ fn main() {
             upload_clip,
             update_clip_metadata,
             export_clip_copy,
+            list_upload_history,
             take_screenshot,
             list_screenshots,
             reveal_screenshot,
@@ -1535,9 +1579,36 @@ fn start_backend_workers(app: tauri::AppHandle) {
             let runtime = app.state::<AppRuntime>();
             let _ = refresh_detected_game_inner(runtime.inner());
             let _ = poll_auto_clip_events_inner(runtime.inner());
+            let _ = stop_capture_on_critical_storage(runtime.inner());
             thread::sleep(Duration::from_secs(2));
         })
         .expect("could not start ClipForge backend workers");
+}
+
+fn stop_capture_on_critical_storage(runtime: &AppRuntime) -> Result<(), String> {
+    let buffer_root = {
+        let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+        recorder.paths.buffer_root.clone()
+    };
+    if runtime
+        .capture
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let storage = clipforge::storage::check_storage_space(&buffer_root);
+    if let clipforge::storage::StorageLevel::Critical = storage.level {
+        let _ = stop_capture_inner(runtime);
+        let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+        recorder.state.status = RecordingStatus::StorageLow;
+        eprintln!(
+            "ClipForge stopped recording: critical low disk ({:.1} GB free).",
+            storage.free_gb()
+        );
+    }
+    Ok(())
 }
 
 fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
@@ -1582,6 +1653,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         hotkey_clip_last_30s: recorder.settings.hotkeys.clip_last_30s.clone(),
         hotkey_toggle_session_recording: recorder.settings.hotkeys.toggle_session_recording.clone(),
         hotkey_screenshot: recorder.settings.hotkeys.screenshot.clone(),
+        free_disk_gb: clipforge::storage::check_storage_space(&recorder.paths.buffer_root).free_gb(),
     }
 }
 
