@@ -50,6 +50,7 @@
 - Auto-update checks the GitHub repo releases (`Alvin-Zilverstand/clipforge-game-clipper`) for the latest MSI/NSIS installer, compares it against the running version, downloads it to temp, launches the installer, and exits the app to finish; version comparison, asset selection, and parsing are unit tested plus one ignored live test against the GitHub API.
 - A GitHub Actions release workflow publishes MSI/NSIS assets on tag push; auto-update will pick up newer releases automatically once the repo ships a tag newer than the running app version.
 - The Settings screen shows the current version, checks for updates, and offers a Download & install button when a newer release exists.
+- First-run onboarding wizard walks new installs through privacy/audio, capture-source, storage, and hotkey setup before showing the main app; it uses the defaults already saved in `settings.json` so existing users are unaffected.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
@@ -61,13 +62,12 @@
 - Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen. CS2 round/bomb/match-start and Dota 2 match-start/match-end transitions are mapped, but per-player kill/death/objective event detection for Dota 2 and other Source titles is still needed.
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
-- Installer onboarding is still not implemented.
 - Auto-update requires a GitHub release whose tag is newer than the running app version and that ships MSI/NSIS assets (the existing `v0.0.1` release carries 0.1.0 assets, so it correctly reports up to date).
 
 ## Next Engineering Steps
 
 1. Add per-process loopback capture so individual application audio can be captured independently of the system mix.
 2. Add per-player kill/death/objective event detection for Dota 2 and other Source titles beyond the current match-level transitions.
-3. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
-4. Exercise the GitHub Actions release workflow with a real tag push and verify the published assets appear in a GitHub Release.
+3. Exercise the GitHub Actions release workflow with a real tag push and verify the published assets appear in a GitHub Release.
+4. Split the recorder service into a separate background process so capture survives app restarts.
 5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.

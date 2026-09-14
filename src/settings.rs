@@ -91,6 +91,8 @@ pub struct AppSettings {
     pub upload: UploadSettings,
     #[serde(default)]
     pub quality_overrides_by_game: BTreeMap<String, QualityPreset>,
+    #[serde(default)]
+    pub onboarding_complete: bool,
 }
 
 impl AppSettings {
@@ -137,6 +139,7 @@ impl AppSettings {
             },
             upload: UploadSettings::default(),
             quality_overrides_by_game: BTreeMap::new(),
+            onboarding_complete: false,
         }
     }
 
@@ -283,6 +286,31 @@ mod tests {
         assert_eq!(loaded.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(loaded.upload.provider, "catbox");
         assert!(!loaded.upload.auto_upload_enabled);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_install_starts_onboarding_and_legacy_config_upgrades_it() {
+        let root = std::env::temp_dir().join(format!(
+            "clipforge-settings-onboarding-{}",
+            SystemTimeCompat::millis()
+        ));
+        fs::create_dir_all(&root).expect("settings root");
+        let mut value =
+            serde_json::to_value(AppSettings::default_for_root(&root)).expect("settings json");
+        value
+            .as_object_mut()
+            .expect("settings object")
+            .remove("onboarding_complete");
+        fs::write(
+            settings_path(&root),
+            serde_json::to_string_pretty(&value).expect("legacy settings"),
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_or_create_settings(&root).expect("load migrated settings");
+
+        assert!(!loaded.onboarding_complete);
         let _ = fs::remove_dir_all(root);
     }
 

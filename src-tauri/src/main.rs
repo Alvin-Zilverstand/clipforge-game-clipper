@@ -132,6 +132,7 @@ struct DesktopStatus {
     game_quality_overrides: Vec<GameQualityOverrideDto>,
     effective_quality_applied: bool,
     app_version: String,
+    onboarding_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -425,6 +426,43 @@ fn set_capture_settings(
     recorder.settings.privacy.separate_audio_tracks = separate_audio_tracks;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save capture settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn finish_onboarding(
+    system_audio_enabled: Option<bool>,
+    mic_enabled: Option<bool>,
+    separate_audio_tracks: Option<bool>,
+    auto_record_enabled: Option<bool>,
+    replay_buffer_seconds: Option<u64>,
+    storage_limit_gb: Option<u64>,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    if let Some(enabled) = system_audio_enabled {
+        recorder.settings.privacy.system_audio_enabled = enabled;
+    }
+    if let Some(enabled) = mic_enabled {
+        recorder.settings.privacy.mic_enabled = enabled;
+    }
+    if let Some(enabled) = separate_audio_tracks {
+        recorder.settings.privacy.separate_audio_tracks = enabled;
+    }
+    if let Some(enabled) = auto_record_enabled {
+        recorder.settings.privacy.desktop_capture_requires_confirmation = !enabled;
+    }
+    if let Some(seconds) = replay_buffer_seconds {
+        recorder.settings.replay_buffer = Duration::from_secs(seconds);
+        recorder.settings.clamp_replay_buffer();
+    }
+    if let Some(gb) = storage_limit_gb {
+        recorder.settings.storage_limit_gb = gb.clamp(5, 5000);
+    }
+    recorder.settings.onboarding_complete = true;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save onboarding settings: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref()))
 }
 
@@ -1573,6 +1611,7 @@ fn main() {
             set_upload_settings,
             set_auto_clip_event_enabled,
             set_capture_settings,
+            finish_onboarding,
             write_gsi_configs,
             poll_auto_clip_events,
             save_manual_clip,
@@ -1873,6 +1912,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         game_quality_overrides: quality_override_dtos(&recorder.settings),
         effective_quality_applied: game_override_is_active(&recorder.settings, &game_id),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
+        onboarding_complete: recorder.settings.onboarding_complete,
     }
 }
 

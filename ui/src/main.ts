@@ -84,6 +84,7 @@ type DesktopStatus = {
   game_quality_overrides: GameQualityOverrideDto[];
   effective_quality_applied: boolean;
   app_version: string;
+  onboarding_complete: boolean;
 };
 
 type ClipDto = {
@@ -188,6 +189,8 @@ type AppState = {
   excludedWindowText: string;
   separateAudioTracks: boolean;
   appVersion: string;
+  onboardingComplete: boolean;
+  onboardingStep: number;
   gameQualityOverrides: GameQualityOverrideDto[];
   effectiveQualityApplied: boolean;
   update: UpdateInfo;
@@ -275,6 +278,8 @@ const state: AppState = {
   excludedWindowText: "",
   separateAudioTracks: false,
   appVersion: "0.1.0",
+  onboardingComplete: true,
+  onboardingStep: 0,
   gameQualityOverrides: [],
   effectiveQualityApplied: false,
   update: {
@@ -297,6 +302,12 @@ if (!root) {
 const appRoot = root;
 
 function render() {
+  if (!state.onboardingComplete) {
+    appRoot.innerHTML = renderOnboardingWizard();
+    bindEvents();
+    return;
+  }
+
   const selectedClip = state.clips.find((clip) => clip.id === state.selectedClipId) ?? state.clips[0];
   appRoot.innerHTML = `
     <main class="app-shell">
@@ -324,6 +335,98 @@ function render() {
     </main>
   `;
   bindEvents();
+}
+
+function renderOnboardingWizard() {
+  const step = state.onboardingStep;
+  const steps = ["Privacy", "Capture source", "Storage", "Hotkeys"];
+  const stepBody = (() => {
+    switch (step) {
+      case 0:
+        return `
+          <h2>What should ClipForge record?</h2>
+          <p class="muted">You can change any of these later in Settings. Audio is mixed into
+          your clips; enable separate tracks to keep system and mic audio in distinct tracks.</p>
+          <div class="wizard-options">
+            <label class="toggle"><input type="checkbox" ${state.systemAudioEnabled ? "checked" : ""} data-action="onboard-system-audio" /> Capture system audio</label>
+            <label class="toggle"><input type="checkbox" ${state.micEnabled ? "checked" : ""} data-action="onboard-mic" /> Capture microphone</label>
+            <label class="toggle"><input type="checkbox" ${state.separateAudioTracks ? "checked" : ""} data-action="onboard-separate-tracks" /> Keep system and mic in separate tracks</label>
+          </div>`;
+      case 1:
+        return `
+          <h2>When should recording start?</h2>
+          <p class="muted">Auto-clipping keeps a rolling buffer and saves highlights when
+          supported games detect events. Continuous recording saves the full session.</p>
+          <div class="wizard-options">
+            <label class="toggle"><input type="checkbox" ${state.autoRecordEnabled ? "checked" : ""} data-action="onboard-auto-record" /> Start recording automatically when a game is detected</label>
+          </div>
+          <div class="field-row">
+            <label>Replay buffer
+              <select data-action="onboard-buffer">
+                ${[30, 60, 120, 240, 300]
+                  .map(
+                    (seconds) =>
+                      `<option value="${seconds}" ${state.replayBufferSeconds === seconds ? "selected" : ""}>${seconds < 60 ? `${seconds}s` : `${seconds / 60} min`}</option>`,
+                  )
+                  .join("")}
+              </select>
+            </label>
+          </div>`;
+      case 2:
+        return `
+          <h2>How much disk space is ClipForge allowed to use?</h2>
+          <p class="muted">The rolling buffer shrinks automatically to fit this limit.
+          Finished clips are saved to your library and are never pruned.</p>
+          <div class="field-row">
+            <label>Storage limit (GB)
+              <input type="number" min="5" max="5000" step="5" value="${state.storageLimitGb}" data-action="onboard-storage" />
+            </label>
+          </div>`;
+      case 3:
+        return `
+          <h2>You're almost set</h2>
+          <p class="muted">These hotkeys are active while the app is running. You can
+          customize them anytime in Settings.</p>
+          <ul class="hotkey-list">
+            <li><span>Save last ${state.replayBufferSeconds}s clip</span><kbd>${escapeHtml(state.hotkeyClipLast60s)}</kbd></li>
+            <li><span>Save last 30s clip</span><kbd>${escapeHtml(state.hotkeyClipLast30s)}</kbd></li>
+            <li><span>Toggle recording</span><kbd>${escapeHtml(state.hotkeyToggleRecording)}</kbd></li>
+            <li><span>Take screenshot</span><kbd>${escapeHtml(state.hotkeyScreenshot)}</kbd></li>
+          </ul>`;
+      default:
+        return "";
+    }
+  })();
+
+  return `
+    <main class="app-shell onboarding-shell">
+      <section class="workspace onboarding-workspace">
+        <div class="wizard-card">
+          <div class="wizard-header">
+            <span class="brand-mark">CF</span>
+            <div>
+              <h1>Welcome to ClipForge</h1>
+              <p class="muted">Set up capture in a few quick steps.</p>
+            </div>
+          </div>
+          <ol class="wizard-steps">
+            ${steps
+              .map(
+                (name, index) => `
+                  <li class="${index === step ? "active" : ""} ${index < step ? "done" : ""}">${name}</li>
+                `,
+              )
+              .join("")}
+          </ol>
+          <div class="wizard-body">${stepBody}</div>
+          <div class="wizard-actions">
+            ${step === 0 ? `<button class="ghost-button" data-action="onboarding-skip">Skip setup</button>` : `<button class="ghost-button" data-action="onboarding-back">Back</button>`}
+            ${step < steps.length - 1 ? `<button class="primary-button" data-action="onboarding-next">Continue</button>` : `<button class="primary-button" data-action="onboarding-finish">Get clipping</button>`}
+          </div>
+        </div>
+      </section>
+    </main>
+  `;
 }
 
 function renderRecordingBar() {
@@ -1006,6 +1109,24 @@ function bindEvents() {
     void clearGameQualityOverride();
   });
 
+  appRoot.querySelector<HTMLButtonElement>("[data-action='onboarding-next']")?.addEventListener("click", () => {
+    state.onboardingStep = Math.min(state.onboardingStep + 1, 3);
+    render();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='onboarding-back']")?.addEventListener("click", () => {
+    state.onboardingStep = Math.max(state.onboardingStep - 1, 0);
+    render();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='onboarding-finish']")?.addEventListener("click", () => {
+    void finishOnboarding();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='onboarding-skip']")?.addEventListener("click", () => {
+    void skipOnboarding();
+  });
+
   appRoot.querySelector<HTMLButtonElement>("[data-action='download-update']")?.addEventListener("click", () => {
     void downloadUpdate();
   });
@@ -1302,6 +1423,9 @@ state.separateAudioTracks = status.separate_audio_tracks ?? false;
   state.appVersion = status.app_version ?? state.appVersion;
   state.gameQualityOverrides = status.game_quality_overrides ?? [];
   state.effectiveQualityApplied = status.effective_quality_applied ?? false;
+  if (typeof status.onboarding_complete === "boolean") {
+    state.onboardingComplete = status.onboarding_complete;
+  }
 }
 
 async function trimSelectedClip() {
@@ -1751,6 +1875,64 @@ async function clearGameQualityOverride() {
   } catch (error) {
     console.warn("Could not clear quality override", error);
     showNotice(`Could not clear quality override: ${String(error)}`);
+  }
+}
+
+async function finishOnboarding() {
+  if (!tauriInvoke) {
+    state.onboardingComplete = true;
+    render();
+    return;
+  }
+
+  const systemAudio = document
+    .querySelector<HTMLInputElement>("[data-action='onboard-system-audio']")?.checked ?? state.systemAudioEnabled;
+  const mic = document
+    .querySelector<HTMLInputElement>("[data-action='onboard-mic']")?.checked ?? state.micEnabled;
+  const separate = document
+    .querySelector<HTMLInputElement>("[data-action='onboard-separate-tracks']")?.checked ?? state.separateAudioTracks;
+  const autoRecord = document
+    .querySelector<HTMLInputElement>("[data-action='onboard-auto-record']")?.checked ?? state.autoRecordEnabled;
+  const buffer = Number(
+    document.querySelector<HTMLSelectElement>("[data-action='onboard-buffer']")?.value ?? state.replayBufferSeconds,
+  );
+  const storage = Number(
+    document.querySelector<HTMLInputElement>("[data-action='onboard-storage']")?.value ?? state.storageLimitGb,
+  );
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("finish_onboarding", {
+      systemAudioEnabled: systemAudio,
+      micEnabled: mic,
+      separateAudioTracks: separate,
+      autoRecordEnabled: autoRecord,
+      replayBufferSeconds: buffer,
+      storageLimitGb: storage,
+    });
+    applyDesktopStatus(status);
+    state.onboardingStep = 0;
+    render();
+  } catch (error) {
+    console.warn("Could not finish onboarding", error);
+    showNotice(`Could not finish setup: ${String(error)}`);
+  }
+}
+
+async function skipOnboarding() {
+  if (!tauriInvoke) {
+    state.onboardingComplete = true;
+    render();
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("finish_onboarding", {});
+    applyDesktopStatus(status);
+    state.onboardingStep = 0;
+    render();
+  } catch (error) {
+    console.warn("Could not skip onboarding", error);
+    showNotice(`Could not skip setup: ${String(error)}`);
   }
 }
 
