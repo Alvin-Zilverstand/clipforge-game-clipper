@@ -1,7 +1,7 @@
 use crate::capture::{CaptureConfig, CaptureError, CaptureMethod, CaptureSource, EncoderPreference};
+use crate::proc::hidden_command;
 use dirs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 impl Default for ScreenshotCapture {
@@ -145,7 +145,7 @@ impl ScreenshotCapture {
             output_path.display().to_string(),
         ]);
 
-        let status = Command::new(&self.executable)
+        let status = hidden_command(&self.executable)
             .args(&args)
             .status()
             .map_err(|e| CaptureError::DeviceUnavailable(e.to_string()))?;

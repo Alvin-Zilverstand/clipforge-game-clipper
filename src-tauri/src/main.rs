@@ -3,7 +3,7 @@
 
 use clipforge::audio::{list_ffmpeg_dshow_audio_inputs, AudioDeviceKind};
 use clipforge::capture::{
-    ffmpeg_is_available, ffmpeg_supports_filter, ffmpeg_supports_input_device,
+    ffmpeg_supports_filter, ffmpeg_supports_input_device,
     find_ffmpeg_executable, CaptureBackend, CaptureConfig, CaptureMethod, CaptureSource,
     EncoderPreference, FfmpegReplayCaptureBackend,
 };
@@ -25,6 +25,7 @@ use clipforge::native_audio::{
     NativeAudioSource,
 };
 use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
+use clipforge::proc::hidden_command;
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings, AppSettings};
 use clipforge::storage::{clip_path, is_inside_root, resolve_library_root, LibraryPaths};
@@ -52,6 +53,30 @@ struct AppRuntime {
     valve_events: Mutex<Vec<RawGameEvent>>,
     hotkey_shortcuts: Mutex<Option<HotkeyShortcuts>>,
     app_handle: Mutex<Option<tauri::AppHandle>>,
+    capture_capabilities: CaptureCapabilities,
+}
+
+#[derive(Clone)]
+struct CaptureCapabilities {
+    ffmpeg_path: Option<PathBuf>,
+    system_audio_available: bool,
+    desktop_duplication_available: bool,
+}
+
+fn detect_capture_capabilities() -> CaptureCapabilities {
+    let ffmpeg_path = find_ffmpeg_executable();
+    let (system_audio_available, desktop_duplication_available) = match &ffmpeg_path {
+        Some(path) => (
+            native_system_loopback_available() || ffmpeg_supports_input_device(path, "wasapi"),
+            ffmpeg_supports_filter(path, "ddagrab"),
+        ),
+        None => (native_system_loopback_available(), false),
+    };
+    CaptureCapabilities {
+        ffmpeg_path,
+        system_audio_available,
+        desktop_duplication_available,
+    }
 }
 
 struct HotkeyShortcuts {
@@ -194,7 +219,7 @@ struct AutoClipEventDto {
 fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -233,7 +258,7 @@ fn refresh_detected_game_inner(runtime: &AppRuntime) -> Result<DesktopStatus, St
 
         if !should_auto_start {
             if !should_auto_stop {
-                return Ok(status_from_recorder(&recorder, capture.as_ref()));
+                return Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities));
             }
         }
     }
@@ -259,7 +284,7 @@ fn set_replay_buffer(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<Des
     recorder.settings.clamp_replay_buffer();
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -269,7 +294,7 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
     recorder.settings.privacy.mic_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -282,7 +307,7 @@ fn set_system_audio_enabled(
     recorder.settings.privacy.system_audio_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -328,7 +353,7 @@ fn set_mic_device(
     recorder.settings.privacy.mic_device = device.filter(|value| !value.trim().is_empty());
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -341,7 +366,7 @@ fn set_auto_record_enabled(
     recorder.settings.privacy.desktop_capture_requires_confirmation = !enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -373,7 +398,7 @@ fn set_upload_settings(
     recorder.settings.upload.custom_headers = parse_header_lines(&custom_headers.join("\n"));
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save upload settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -399,7 +424,7 @@ fn set_auto_clip_event_enabled(
     }
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -425,7 +450,7 @@ fn set_capture_settings(
     recorder.settings.privacy.separate_audio_tracks = separate_audio_tracks;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save capture settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -462,7 +487,7 @@ fn finish_onboarding(
     recorder.settings.onboarding_complete = true;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save onboarding settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 fn even_between(value: u32, min: u32, max: u32) -> u32 {
@@ -686,7 +711,7 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let mut capture = runtime.capture.lock().map_err(|error| error.to_string())?;
 
     if capture.is_some() {
-        return Ok(status_from_recorder(&recorder, capture.as_ref()));
+        return Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities));
     }
 
     let storage = clipforge::storage::check_storage_space(&recorder.paths.buffer_root);
@@ -780,7 +805,7 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         backend,
     });
 
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -823,7 +848,7 @@ fn stop_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     if matches!(recorder.state.status, RecordingStatus::RecordingSession) {
         recorder.toggle_session_recording();
     }
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -864,7 +889,7 @@ fn reveal_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<(), St
         return Err(format!("Clip file does not exist: {}", clip.path.display()));
     }
 
-    Command::new("explorer")
+    hidden_command("explorer")
         .arg(format!("/select,{}", clip.path.display()))
         .spawn()
         .map_err(|error| error.to_string())?;
@@ -1102,7 +1127,7 @@ fn take_screenshot(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, Stri
     handle_screenshot()?;
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -1111,7 +1136,7 @@ fn reveal_screenshot(path: String) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("Screenshot file does not exist: {}", path.display()));
     }
-    Command::new("explorer")
+    hidden_command("explorer")
         .arg(format!("/select,{}", path.display()))
         .spawn()
         .map_err(|error| error.to_string())?;
@@ -1130,7 +1155,7 @@ fn list_screenshots() -> Result<Vec<String>, String> {
 fn reveal_crash_logs(runtime: State<'_, AppRuntime>) -> Result<(), String> {
     let logs_dir = runtime.library_root.join("logs");
     fs::create_dir_all(&logs_dir).map_err(|error| error.to_string())?;
-    Command::new("explorer")
+    hidden_command("explorer")
         .arg(logs_dir.display().to_string())
         .spawn()
         .map_err(|error| error.to_string())?;
@@ -1554,7 +1579,7 @@ fn set_hotkeys(
         register_hotkeys(&app_handle, runtime.inner())?;
     }
     
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 fn main() {
@@ -1573,6 +1598,7 @@ fn main() {
             valve_events: Mutex::new(Vec::new()),
             hotkey_shortcuts: Mutex::new(None),
             app_handle: Mutex::new(None),
+            capture_capabilities: detect_capture_capabilities(),
         })
 .setup(|app| {
             let handle = app.handle().clone();
@@ -1864,7 +1890,11 @@ fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
     Ok(())
 }
 
-fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCapture>) -> DesktopStatus {
+fn status_from_recorder(
+    recorder: &RecorderService,
+    capture: Option<&ActiveCapture>,
+    capabilities: &CaptureCapabilities,
+) -> DesktopStatus {
     let game_id = recorder.state.detected_game_id.clone().unwrap_or_default();
     let quality = recorder.settings.effective_quality_for(&game_id).clone();
     DesktopStatus {
@@ -1894,15 +1924,13 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         capture_path: capture.map(|active| active.session_output_path.display().to_string()),
         clip_count: recorder.library.all().len(),
         library_root: recorder.paths.clip_root.display().to_string(),
-        ffmpeg_available: ffmpeg_is_available(),
-        ffmpeg_path: find_ffmpeg_executable().map(|path| path.display().to_string()),
-        system_audio_available: native_system_loopback_available()
-            || find_ffmpeg_executable()
-            .map(|path| ffmpeg_supports_input_device(&path, "wasapi"))
-            .unwrap_or(false),
-        desktop_duplication_available: find_ffmpeg_executable()
-            .map(|path| ffmpeg_supports_filter(&path, "ddagrab"))
-            .unwrap_or(false),
+        ffmpeg_available: capabilities.ffmpeg_path.is_some(),
+        ffmpeg_path: capabilities
+            .ffmpeg_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        system_audio_available: capabilities.system_audio_available,
+        desktop_duplication_available: capabilities.desktop_duplication_available,
         auto_clip_enabled_events: auto_clip_event_dtos(&recorder.settings),
         hotkey_clip_last_60s: recorder.settings.hotkeys.clip_last_60s.clone(),
         hotkey_clip_last_30s: recorder.settings.hotkeys.clip_last_30s.clone(),
@@ -1970,7 +1998,7 @@ fn set_game_quality_override(
         .insert(game_id, preset);
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save quality override: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 #[tauri::command]
@@ -1983,7 +2011,7 @@ fn clear_game_quality_override(
     recorder.settings.quality_overrides_by_game.remove(&game_id);
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save quality override: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref()))
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
 }
 
 fn clip_to_dto(clip: &Clip) -> ClipDto {

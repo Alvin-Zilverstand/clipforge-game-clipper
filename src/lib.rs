@@ -14,6 +14,7 @@ pub mod media;
 pub mod models;
 pub mod native_audio;
 pub mod native_wgc;
+pub mod proc;
 pub mod recorder;
 pub mod settings;
 pub mod storage;

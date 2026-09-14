@@ -1,7 +1,7 @@
+use crate::proc::hidden_command;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +96,7 @@ pub fn concat_segments(
     }
     fs::write(&list_path, list)?;
 
-    let status = Command::new(ffmpeg)
+    let status = hidden_command(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -137,7 +137,7 @@ pub fn trim_clip(
         fs::create_dir_all(parent)?;
     }
 
-    let status = Command::new(ffmpeg)
+    let status = hidden_command(ffmpeg)
         .args([
             "-y",
             "-hide_banner",
@@ -168,7 +168,7 @@ pub fn generate_thumbnail(ffmpeg: &Path, input: &Path, output: &Path) -> Result<
         fs::create_dir_all(parent)?;
     }
 
-    let status = Command::new(ffmpeg)
+    let status = hidden_command(ffmpeg)
         .args([
             "-y",
             "-hide_banner",

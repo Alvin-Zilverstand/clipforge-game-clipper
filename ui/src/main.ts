@@ -1673,7 +1673,7 @@ async function saveAutoRecordSetting(enabled: boolean) {
 }
 
 async function refreshStatus() {
-  if (!tauriInvoke) {
+  if (!tauriInvoke || !state.onboardingComplete) {
     return;
   }
 
@@ -1700,7 +1700,7 @@ async function refreshAudioDevices() {
 }
 
 async function pollAutoClips() {
-  if (!tauriInvoke || !state.captureActive) {
+  if (!tauriInvoke || !state.captureActive || !state.onboardingComplete) {
     return;
   }
 

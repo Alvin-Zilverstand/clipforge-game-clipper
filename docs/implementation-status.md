@@ -52,6 +52,7 @@
 - The Settings screen shows the current version, checks for updates, and offers a Download & install button when a newer release exists.
 - First-run onboarding wizard walks new installs through privacy/audio, capture-source, storage, and hotkey setup before showing the main app; it uses the defaults already saved in `settings.json` so existing users are unaffected.
 - The default clip library root is `~/Documents/ClipForge` (rather than the process working directory), and a first-run migration moves any legacy `clipforge-library` folder found in the CWD into the new location while rewriting stored clip paths in the SQLite database.
+- Capture capabilities (bundled FFmpeg discovery, WASAPI/ddagrab support) are detected once at startup and cached, so background workers (`refresh_detected_game` every 2s, UI status poll every 3s) never spawn FFmpeg; all FFmpeg/console subprocesses are launched with a hidden console window on Windows, preventing the app from freezing and flashing a terminal repeatedly.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.

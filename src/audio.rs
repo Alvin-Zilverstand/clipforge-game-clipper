@@ -1,5 +1,5 @@
+use crate::proc::hidden_command;
 use std::path::Path;
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioDeviceKind {
@@ -14,7 +14,7 @@ pub struct AudioDevice {
 }
 
 pub fn list_ffmpeg_dshow_audio_inputs(ffmpeg: &Path) -> Vec<AudioDevice> {
-    let Ok(output) = Command::new(ffmpeg)
+    let Ok(output) = hidden_command(ffmpeg)
         .args([
             "-hide_banner",
             "-list_devices",

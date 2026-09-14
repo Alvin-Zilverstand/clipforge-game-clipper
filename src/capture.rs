@@ -1,7 +1,8 @@
+use crate::proc::hidden_command;
 use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -114,7 +115,7 @@ pub fn find_ffmpeg_executable() -> Option<PathBuf> {
 
     let candidates = ["ffmpeg.exe", "ffmpeg"];
     for candidate in candidates {
-        if Command::new(candidate).arg("-version").output().is_ok() {
+        if hidden_command(candidate).arg("-version").output().is_ok() {
             return Some(PathBuf::from(candidate));
         }
     }
@@ -127,7 +128,7 @@ pub fn ffmpeg_is_available() -> bool {
 }
 
 pub fn ffmpeg_supports_input_device(executable: &std::path::Path, device: &str) -> bool {
-    let Ok(output) = Command::new(executable)
+    let Ok(output) = hidden_command(executable)
         .args(["-hide_banner", "-devices"])
         .output()
     else {
@@ -144,7 +145,7 @@ pub fn ffmpeg_supports_input_device(executable: &std::path::Path, device: &str) 
 }
 
 pub fn ffmpeg_supports_filter(executable: &std::path::Path, filter: &str) -> bool {
-    let Ok(output) = Command::new(executable)
+    let Ok(output) = hidden_command(executable)
         .args(["-hide_banner", "-filters"])
         .output()
     else {
@@ -368,7 +369,7 @@ impl CaptureBackend for FfmpegCaptureBackend {
         }
 
         let plan = self.plan(&config);
-        let child = Command::new(&plan.executable)
+        let child = hidden_command(&plan.executable)
             .args(&plan.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -474,7 +475,7 @@ impl Drop for FfmpegReplayCaptureBackend {
 }
 
 fn spawn_ffmpeg(plan: &FfmpegRecordingPlan) -> Result<Child, CaptureError> {
-    Command::new(&plan.executable)
+    hidden_command(&plan.executable)
         .args(&plan.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
