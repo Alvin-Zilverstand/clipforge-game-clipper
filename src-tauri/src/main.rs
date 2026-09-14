@@ -28,6 +28,7 @@ use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings, AppSettings};
 use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
+use clipforge::updater::{self, UpdateCheck};
 use clipforge::upload::{
     CatboxUploader, CustomHttpUploader, LitterboxUploader, UploadMetadata, UploadResult, Uploader,
 };
@@ -128,6 +129,7 @@ struct DesktopStatus {
     storage_limit_gb: u64,
     excluded_window_titles: Vec<String>,
     separate_audio_tracks: bool,
+    app_version: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1106,6 +1108,67 @@ fn list_crash_logs(runtime: State<'_, AppRuntime>) -> Result<Vec<String>, String
         .collect())
 }
 
+#[tauri::command]
+async fn check_for_updates() -> Result<UpdateCheck, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let repo = updater::DEFAULT_UPDATE_REPO.to_string();
+    let check = tauri::async_runtime::spawn_blocking(move || {
+        updater::check_for_updates(&repo, &current_version)
+    })
+    .await
+    .map_err(|error| format!("Update check task failed: {error}"))?;
+    check.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn download_and_apply_update(
+    app: tauri::AppHandle,
+    download_url: String,
+    installer_file: String,
+) -> Result<String, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let installer_path = tauri::async_runtime::spawn_blocking(move || {
+        let updates_dir = std::env::temp_dir().join("clipforge-updates");
+        updater::download_installer(
+            &download_url,
+            &updates_dir,
+            &installer_file,
+            &current_version,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Update download task failed: {error}"))??;
+    launch_installer(&installer_path)?;
+    let handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(800));
+        handle.exit(0);
+    });
+    Ok("Installer downloaded and started. ClipForge will close to finish the update.".to_string())
+}
+
+fn launch_installer(path: &PathBuf) -> Result<(), String> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let spawned = if extension == "msi" {
+        Command::new("msiexec")
+            .arg("/i")
+            .arg(path)
+            .arg("/passive")
+            .arg("/norestart")
+            .spawn()
+    } else {
+        Command::new(path).arg("/S").spawn()
+    };
+    spawned
+        .map(|_| ())
+        .map_err(|error| format!("Could not launch installer: {error}"))
+}
+
 fn upload_clip_with_settings(
     clip: &Clip,
     settings: &AppSettings,
@@ -1510,6 +1573,8 @@ fn main() {
             reveal_screenshot,
             reveal_crash_logs,
             list_crash_logs,
+            check_for_updates,
+            download_and_apply_update,
             set_hotkeys
         ])
         .run(tauri::generate_context!())
@@ -1764,6 +1829,7 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         storage_limit_gb: recorder.settings.storage_limit_gb,
         excluded_window_titles: recorder.settings.privacy.excluded_window_titles.clone(),
         separate_audio_tracks: recorder.settings.privacy.separate_audio_tracks,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
     }
 }
 

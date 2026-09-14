@@ -44,6 +44,8 @@
 - Capture quality and storage settings are exposed: the Settings screen can change resolution, FPS, bitrate, buffer storage cap, excluded window titles, and the separate-audio-tracks toggle via the `set_capture_settings` command, and current values are shown in DesktopStatus.
 - The configured storage cap is enforced by a backend worker that prunes the oldest rolling buffer segments once the buffer exceeds `storage_limit_gb`.
 - SQLite schema uses versioned migrations tracked via `PRAGMA user_version`; legacy databases (missing tables or the `title` column) are repaired and upgraded in place, with migration tests.
+- Auto-update checks the GitHub repo releases (`Alvin-Zilverstand/clipforge-game-clipper`) for the latest MSI/NSIS installer, compares it against the running version, downloads it to temp, launches the installer, and exits the app to finish; version comparison, asset selection, and parsing are unit tested plus one ignored live test against the GitHub API.
+- The Settings screen shows the current version, checks for updates, and offers a Download & install button when a newer release exists.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
@@ -56,7 +58,8 @@
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
 - Per-game capture quality overrides are still incomplete.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
-- Installer onboarding and auto-update are still not implemented.
+- Installer onboarding is still not implemented.
+- Auto-update requires a GitHub release whose tag is newer than the running app version and that ships MSI/NSIS assets (the existing `v0.0.1` release carries 0.1.0 assets, so it correctly reports up to date).
 
 ## Next Engineering Steps
 
@@ -64,4 +67,5 @@
 2. Expand CS2/Dota GSI event mapping beyond the current MVP event parser.
 3. Add per-game capture quality overrides.
 4. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
-5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.
+5. Automate building and publishing GitHub releases (e.g. a GitHub Action that runs Tauri + uploads MSI/NSIS assets) so the updater has fresh assets to install.
+6. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.

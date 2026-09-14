@@ -81,6 +81,7 @@ type DesktopStatus = {
   storage_limit_gb: number;
   excluded_window_titles: string[];
   separate_audio_tracks: boolean;
+  app_version: string;
 };
 
 type ClipDto = {
@@ -116,6 +117,16 @@ type GsiConfigDto = {
 type AudioDeviceDto = {
   name: string;
   kind: "input" | "system_loopback";
+};
+
+type UpdateInfo = {
+  checked: boolean;
+  updateAvailable: boolean;
+  latestVersion: string;
+  installerFile: string;
+  downloadUrl: string;
+  message: string;
+  applying: boolean;
 };
 
 type AppState = {
@@ -165,6 +176,8 @@ type AppState = {
   excludedWindowTitles: string[];
   excludedWindowText: string;
   separateAudioTracks: boolean;
+  appVersion: string;
+  update: UpdateInfo;
 };
 
 type TauriGlobal = {
@@ -248,6 +261,16 @@ const state: AppState = {
   excludedWindowTitles: [],
   excludedWindowText: "",
   separateAudioTracks: false,
+  appVersion: "0.1.0",
+  update: {
+    checked: false,
+    updateAvailable: false,
+    latestVersion: "",
+    installerFile: "",
+    downloadUrl: "",
+    message: "Updates have not been checked yet.",
+    applying: false,
+  },
 };
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -693,9 +716,14 @@ function renderSettingsView() {
         <p class="muted">Old temporary buffer segments are removed automatically once the buffer reaches the cap; saved clips are kept.</p>
       </article>
       <article class="settings-panel">
-        <p class="eyebrow">Support</p>
-        <h2>Crash logs</h2>
-        <p class="muted">Panic details are written to the logs folder so issues can be investigated.</p>
+        <p class="eyebrow">About & support</p>
+        <h2>ClipForge ${escapeHtml(state.appVersion)}</h2>
+        <p class="muted">${escapeHtml(state.update.message)}</p>
+        ${state.update.updateAvailable ? `
+          <button data-action="download-update" ${state.update.applying ? "disabled" : ""}>Download & install v${escapeHtml(state.update.latestVersion)}</button>
+        ` : `
+          <button data-action="check-updates" ${state.update.applying ? "disabled" : ""}>Check for updates</button>
+        `}
         <button data-action="reveal-crash-logs">Reveal Crash Logs</button>
       </article>
       <article class="settings-panel">
@@ -914,6 +942,14 @@ function bindEvents() {
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='save-capture-settings']")?.addEventListener("click", () => {
     void saveCaptureSettings();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='check-updates']")?.addEventListener("click", () => {
+    void checkForUpdates();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='download-update']")?.addEventListener("click", () => {
+    void downloadUpdate();
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='reveal-crash-logs']")?.addEventListener("click", () => {
@@ -1205,6 +1241,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.excludedWindowTitles = status.excluded_window_titles ?? [];
   state.excludedWindowText = (status.excluded_window_titles ?? []).join(", ");
   state.separateAudioTracks = status.separate_audio_tracks ?? false;
+  state.appVersion = status.app_version ?? state.appVersion;
 }
 
 async function trimSelectedClip() {
@@ -1602,6 +1639,61 @@ function parseResolution(value: string): [number, number] {
     Number.isFinite(width) ? width : 1280,
     Number.isFinite(height) ? height : 720,
   ];
+}
+
+async function checkForUpdates() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  state.update.applying = true;
+  state.update.message = "Checking for updates…";
+  render();
+
+  try {
+    const info = await tauriInvoke<{
+      update_available: boolean;
+      latest_version: string;
+      installer_file: string | null;
+      download_url: string | null;
+      message: string;
+    }>("check_for_updates");
+    state.update.checked = true;
+    state.update.updateAvailable = info.update_available;
+    state.update.latestVersion = info.latest_version;
+    state.update.installerFile = info.installer_file ?? "";
+    state.update.downloadUrl = info.download_url ?? "";
+    state.update.message = info.message;
+  } catch (error) {
+    console.warn("Could not check for updates", error);
+    state.update.message = `Could not check for updates: ${String(error)}`;
+  }
+
+  state.update.applying = false;
+  render();
+}
+
+async function downloadUpdate() {
+  if (!tauriInvoke || !state.update.downloadUrl || !state.update.installerFile) {
+    return;
+  }
+
+  state.update.applying = true;
+  state.update.message = "Downloading update…";
+  render();
+
+  try {
+    const message = await tauriInvoke<string>("download_and_apply_update", {
+      downloadUrl: state.update.downloadUrl,
+      installerFile: state.update.installerFile,
+    });
+    showNotice(message);
+  } catch (error) {
+    console.warn("Could not download the update", error);
+    state.update.applying = false;
+    state.update.message = `Could not download the update: ${String(error)}`;
+    render();
+  }
 }
 
 async function takeScreenshot() {

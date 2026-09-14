@@ -17,6 +17,7 @@ pub mod native_wgc;
 pub mod recorder;
 pub mod settings;
 pub mod storage;
+pub mod updater;
 pub mod upload;
 
 pub use models::{Clip, ClipSource, GameEvent, GameEventType, RecordingStatus, UploadProvider};
