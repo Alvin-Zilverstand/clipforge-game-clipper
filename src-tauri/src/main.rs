@@ -39,7 +39,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Manager, State};
@@ -53,7 +53,7 @@ struct AppRuntime {
     valve_events: Mutex<Vec<RawGameEvent>>,
     hotkey_shortcuts: Mutex<Option<HotkeyShortcuts>>,
     app_handle: Mutex<Option<tauri::AppHandle>>,
-    capture_capabilities: CaptureCapabilities,
+    capture_capabilities: OnceLock<CaptureCapabilities>,
 }
 
 #[derive(Clone)]
@@ -63,14 +63,24 @@ struct CaptureCapabilities {
     desktop_duplication_available: bool,
 }
 
+const DEFAULT_CAPS: CaptureCapabilities = CaptureCapabilities {
+    ffmpeg_path: None,
+    system_audio_available: false,
+    desktop_duplication_available: false,
+};
+
+fn native_system_loopback_available_bg() -> bool {
+    std::thread::scope(|scope| scope.spawn(native_system_loopback_available).join().unwrap_or(false))
+}
+
 fn detect_capture_capabilities() -> CaptureCapabilities {
     let ffmpeg_path = find_ffmpeg_executable();
     let (system_audio_available, desktop_duplication_available) = match &ffmpeg_path {
         Some(path) => (
-            native_system_loopback_available() || ffmpeg_supports_input_device(path, "wasapi"),
+            native_system_loopback_available_bg() || ffmpeg_supports_input_device(path, "wasapi"),
             ffmpeg_supports_filter(path, "ddagrab"),
         ),
-        None => (native_system_loopback_available(), false),
+        None => (native_system_loopback_available_bg(), false),
     };
     CaptureCapabilities {
         ffmpeg_path,
@@ -1598,7 +1608,7 @@ fn main() {
             valve_events: Mutex::new(Vec::new()),
             hotkey_shortcuts: Mutex::new(None),
             app_handle: Mutex::new(None),
-            capture_capabilities: detect_capture_capabilities(),
+            capture_capabilities: OnceLock::new(),
         })
 .setup(|app| {
             let handle = app.handle().clone();
@@ -1606,6 +1616,11 @@ fn main() {
             // Store app handle for hotkey re-registration
             {
                 let runtime = app.state::<AppRuntime>();
+                // Detect capture capabilities after Tauri has initialized COM for the
+                // main thread. Detecting before setup (e.g. WASAPI on the main thread)
+                // puts the thread in MTA mode and makes window creation fail with
+                // RPC_E_CHANGED_MODE.
+                let _ = runtime.capture_capabilities.set(detect_capture_capabilities());
                 let _ = runtime.app_handle.lock().map(|mut guard| {
                     *guard = Some(handle.clone());
                 });
@@ -1893,8 +1908,9 @@ fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
 fn status_from_recorder(
     recorder: &RecorderService,
     capture: Option<&ActiveCapture>,
-    capabilities: &CaptureCapabilities,
+    capabilities: &OnceLock<CaptureCapabilities>,
 ) -> DesktopStatus {
+    let capabilities = capabilities.get().unwrap_or(&DEFAULT_CAPS);
     let game_id = recorder.state.detected_game_id.clone().unwrap_or_default();
     let quality = recorder.settings.effective_quality_for(&game_id).clone();
     DesktopStatus {
