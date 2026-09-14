@@ -1684,9 +1684,32 @@ fn start_best_capture_backend(
     native_mic_available: bool,
     ffmpeg_system_audio_available: bool,
 ) -> Result<ActiveCaptureBackend, String> {
-    if (!config.system_audio_enabled || native_system_audio_available)
-        && (!config.mic_enabled || native_mic_available)
-    {
+    let separate_tracks =
+        config.system_audio_enabled && config.mic_enabled && config.separate_audio_tracks;
+
+    // windows-capture exposes a single mixed audio channel, so distinct system/mic tracks
+    // can only be encoded through the FFmpeg backend.  Prefer it when the user enabled
+    // separate tracks; fall back to native WGC if FFmpeg cannot start (recording must not
+    // be blocked by a backend choice).
+    if separate_tracks {
+        let mut ffmpeg_backend =
+            FfmpegReplayCaptureBackend::new(ffmpeg, segment_pattern, segment_duration);
+        let mut ffmpeg_config = config.clone();
+        if ffmpeg_config.system_audio_enabled && !ffmpeg_system_audio_available {
+            ffmpeg_config.system_audio_enabled = false;
+        }
+        if ffmpeg_backend.start(ffmpeg_config).is_ok() {
+            return Ok(ActiveCaptureBackend::Ffmpeg(ffmpeg_backend));
+        }
+    }
+
+    if clipforge::capture::native_capture_can_honor_audio(
+        config.system_audio_enabled,
+        config.mic_enabled,
+        config.separate_audio_tracks,
+        native_system_audio_available,
+        native_mic_available,
+    ) {
         let mut native = NativeWgcReplayCaptureBackend::new(segment_pattern, segment_duration);
         if native.start(config.clone()).is_ok() {
             return Ok(ActiveCaptureBackend::NativeWgc(native));

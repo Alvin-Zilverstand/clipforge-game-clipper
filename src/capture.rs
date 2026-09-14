@@ -160,6 +160,23 @@ pub fn ffmpeg_supports_filter(executable: &std::path::Path, filter: &str) -> boo
         .any(|line| line.split_whitespace().any(|part| part == filter))
 }
 
+/// Returns true when the single-track native WGC encoder can satisfy the requested audio
+/// configuration. windows-capture exposes one mixed audio channel, so distinct system/mic
+/// tracks are only achievable through the FFmpeg backend and route there instead.
+pub fn native_capture_can_honor_audio(
+    system_audio_enabled: bool,
+    mic_enabled: bool,
+    separate_audio_tracks: bool,
+    native_system_audio_available: bool,
+    native_mic_available: bool,
+) -> bool {
+    if system_audio_enabled && mic_enabled && separate_audio_tracks {
+        return false;
+    }
+    (!system_audio_enabled || native_system_audio_available)
+        && (!mic_enabled || native_mic_available)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegRecordingPlan {
     pub executable: PathBuf,
@@ -298,9 +315,9 @@ fn base_desktop_input_args(config: &CaptureConfig) -> Vec<String> {
             args.extend([
                 "-map".to_string(),
                 format!("{}:a?", input_idx),
-                "-c:a:{}".to_string(), idx.to_string(),
+                format!("-c:a:{idx}"),
                 "aac".to_string(),
-                "-b:a:{}".to_string(), idx.to_string(),
+                format!("-b:a:{idx}"),
                 "160k".to_string(),
             ]);
         }
@@ -571,5 +588,83 @@ mod tests {
             PathBuf::from("definitely-missing-ffmpeg.exe").as_path(),
             "wasapi"
         ));
+    }
+
+    #[test]
+    fn separate_tracks_map_distinct_audio_inputs() {
+        let config = CaptureConfig {
+            source: CaptureSource::Desktop,
+            method: CaptureMethod::DesktopDuplication,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 6000,
+            encoder: EncoderPreference::HardwareH264,
+            system_audio_enabled: true,
+            mic_enabled: true,
+            system_audio_device: None,
+            mic_device: Some("Microphone".to_string()),
+            separate_audio_tracks: true,
+        };
+
+        let plan = FfmpegRecordingPlan::for_windows_desktop_segments(
+            "ffmpeg",
+            "segment-%05d.mp4",
+            &config,
+            Duration::from_secs(5),
+        );
+
+        assert!(plan.args.iter().any(|arg| arg == "-map"));
+        assert!(plan.args.windows(2).any(|pair| pair == ["-map", "1:a?"]));
+        assert!(plan.args.windows(2).any(|pair| pair == ["-map", "2:a?"]));
+        assert!(plan.args.iter().any(|arg| arg == "-c:a:0"));
+        assert!(plan.args.iter().any(|arg| arg == "-c:a:1"));
+        assert!(plan.args.iter().any(|arg| arg == "wasapi"));
+        assert!(plan.args.iter().any(|arg| arg.contains("Microphone")));
+        assert!(!plan.args.windows(3).any(|triple| triple == ["-c:a", "aac", "-b:a"]));
+    }
+
+    #[test]
+    fn legacy_mixed_audio_keeps_single_track_encoding_when_separate_tracks_off() {
+        let config = CaptureConfig {
+            source: CaptureSource::Desktop,
+            method: CaptureMethod::GdiGrab,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 6000,
+            encoder: EncoderPreference::HardwareH264,
+            system_audio_enabled: true,
+            mic_enabled: true,
+            system_audio_device: None,
+            mic_device: Some("Microphone".to_string()),
+            separate_audio_tracks: false,
+        };
+
+        let plan = FfmpegRecordingPlan::for_windows_desktop("ffmpeg", "out.mp4", &config);
+
+        assert!(plan.args.windows(2).any(|pair| pair == ["-map", "1:a?"]));
+        assert!(plan.args.windows(2).any(|pair| pair == ["-map", "2:a?"]));
+        assert!(plan.args.windows(3).any(|triple| triple == ["-c:a", "aac", "-b:a"]));
+        assert!(!plan.args.iter().any(|arg| arg == "-c:a:0"));
+    }
+
+    #[test]
+    fn native_capture_cannot_honor_separate_tracks() {
+        assert!(!native_capture_can_honor_audio(true, true, true, true, true));
+    }
+
+    #[test]
+    fn native_capture_honors_single_source_combinations() {
+        assert!(native_capture_can_honor_audio(true, false, true, true, false));
+        assert!(native_capture_can_honor_audio(false, true, true, false, true));
+        assert!(native_capture_can_honor_audio(true, true, false, true, true));
+    }
+
+    #[test]
+    fn native_capture_requires_available_native_sources() {
+        assert!(!native_capture_can_honor_audio(true, false, false, false, true));
+        assert!(!native_capture_can_honor_audio(false, true, false, true, false));
+        assert!(native_capture_can_honor_audio(false, false, true, false, false));
     }
 }

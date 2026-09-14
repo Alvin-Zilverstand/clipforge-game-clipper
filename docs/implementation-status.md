@@ -57,7 +57,7 @@
 ## Not Fully Working Yet
 
 - Native Windows Graphics Capture and FFmpeg capture finalization have not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
-- Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work (the separate-audio-tracks setting is stored but not yet honored by the encoder).
+- Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks are now honored by the FFmpeg recording backend (routing around the single-track native WGC encoder), while per-process audio capture remains future work.
 - Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen. CS2 event mapping is now enriched with round, bomb, and match-start metadata, but full per-game mapping for Dota 2 and other Source titles is still needed.
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
@@ -66,7 +66,7 @@
 
 ## Next Engineering Steps
 
-1. Honor the separate-audio-tracks setting by encoding system and mic audio to distinct tracks, and consider per-process loopback capture.
+1. Add per-process loopback capture so individual application audio can be captured independently of the system mix.
 2. Add full per-game Valve GSI event mapping for Dota 2 and other Source titles beyond the current CS2 enrichment.
 3. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
 4. Exercise the GitHub Actions release workflow with a real tag push and verify the published assets appear in a GitHub Release.
