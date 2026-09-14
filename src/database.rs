@@ -172,6 +172,16 @@ impl ClipDatabase {
         Ok(())
     }
 
+    pub fn rewrite_path_prefix(&self, old_prefix: &str, new_prefix: &str) -> rusqlite::Result<usize> {
+        self.connection.execute(
+            "UPDATE clips SET
+                 path = REPLACE(path, ?1, ?2),
+                 thumbnail_path = REPLACE(thumbnail_path, ?1, ?2)
+             WHERE path LIKE ?1 || '%' OR thumbnail_path LIKE ?1 || '%'",
+            params![old_prefix, new_prefix],
+        )
+    }
+
     pub fn insert_upload_history(
         &self,
         clip_id: &str,
@@ -428,6 +438,47 @@ mod tests {
         assert_eq!(history[0].clip_id, "clip-1");
         database.delete_clip("clip-1").expect("delete");
         assert!(database.load_clips().expect("load empty").is_empty());
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn rewrites_stored_paths_to_new_library_root() {
+        let db_path = temp_database_path("rewrite");
+        let database = ClipDatabase::open(&db_path).expect("database");
+        let clip = Clip {
+            id: "clip-1".to_string(),
+            title: None,
+            session_id: "session-1".to_string(),
+            game_id: "counter-strike-2".to_string(),
+            path: PathBuf::from("C:/Old/ClipForge/clips/counter-strike-2/2026-09/clip-1.mp4"),
+            thumbnail_path: Some(PathBuf::from(
+                "C:/Old/ClipForge/thumbs/clip-1.jpg",
+            )),
+            created_at: UNIX_EPOCH + Duration::from_secs(10),
+            duration: Duration::from_secs(60),
+            source: ClipSource::ManualHotkey,
+            event_type: None,
+            tags: Vec::new(),
+            upload_url: None,
+            upload_provider: None,
+        };
+        database.upsert_clip(&clip).expect("upsert");
+
+        let updated = database
+            .rewrite_path_prefix("C:/Old/ClipForge", "C:/Users/alvin/Documents/ClipForge")
+            .expect("rewrite");
+        assert_eq!(updated, 1);
+
+        let loaded = database.load_clips().expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].path,
+            PathBuf::from("C:/Users/alvin/Documents/ClipForge/clips/counter-strike-2/2026-09/clip-1.mp4")
+        );
+        assert_eq!(
+            loaded[0].thumbnail_path.as_deref(),
+            Some(Path::new("C:/Users/alvin/Documents/ClipForge/thumbs/clip-1.jpg"))
+        );
         let _ = std::fs::remove_file(db_path);
     }
 }

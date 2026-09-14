@@ -27,13 +27,12 @@ use clipforge::native_audio::{
 use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings, AppSettings};
-use clipforge::storage::{clip_path, is_inside_root, LibraryPaths};
+use clipforge::storage::{clip_path, is_inside_root, resolve_library_root, LibraryPaths};
 use clipforge::updater::{self, UpdateCheck};
 use clipforge::upload::{
     CatboxUploader, CustomHttpUploader, LitterboxUploader, UploadMetadata, UploadResult, Uploader,
 };
 use serde::Serialize;
-use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -1645,15 +1644,22 @@ fn handle_screenshot() -> Result<(), String> {
 }
 
 fn create_runtime() -> Result<(PathBuf, RecorderService, ClipDatabase), String> {
-    let root = env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("clipforge-library");
+    let resolution = resolve_library_root()
+        .map_err(|error| format!("Could not resolve library root: {error}"))?;
+    let root = resolution.root;
     let settings = load_or_create_settings(&root)
         .map_err(|error| format!("Could not load settings: {error}"))?;
     let paths = LibraryPaths::new(&root);
     paths.ensure().map_err(|error| error.to_string())?;
     let database = ClipDatabase::open(root.join("library.sqlite"))
         .map_err(|error| format!("Could not open clip database: {error}"))?;
+    if let Some(legacy) = resolution.migrated_from {
+        let old_prefix = legacy.display().to_string();
+        let new_prefix = root.display().to_string();
+        database
+            .rewrite_path_prefix(&old_prefix, &new_prefix)
+            .map_err(|error| format!("Could not remap migrated clip paths: {error}"))?;
+    }
     let mut recorder = RecorderService::new(settings, paths);
     for clip in database
         .load_clips()

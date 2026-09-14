@@ -236,6 +236,82 @@ fn collect_files(root: &Path) -> io::Result<Vec<FileFact>> {
     Ok(files)
 }
 
+pub fn default_library_root() -> PathBuf {
+    dirs::document_dir()
+        .map(|docs| docs.join("ClipForge"))
+        .or_else(|| dirs::home_dir().map(|home| home.join("ClipForge")))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("clipforge-library")
+        })
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryResolution {
+    pub root: PathBuf,
+    pub migrated_from: Option<PathBuf>,
+}
+
+pub fn resolve_library_root() -> io::Result<LibraryResolution> {
+    let target = default_library_root();
+    let legacy = legacy_library_in_working_dir();
+    if let Some(legacy) = legacy {
+        if legacy != target && !library_has_content(&target) {
+            migrate_library(&legacy, &target)?;
+            return Ok(LibraryResolution {
+                root: target,
+                migrated_from: Some(legacy),
+            });
+        }
+    }
+    Ok(LibraryResolution {
+        root: target,
+        migrated_from: None,
+    })
+}
+
+fn legacy_library_in_working_dir() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let candidate = cwd.join("clipforge-library");
+    candidate.is_dir().then_some(candidate)
+}
+
+fn library_has_content(path: &Path) -> bool {
+    if path.join("settings.json").exists() || path.join("library.sqlite").exists() {
+        return true;
+    }
+    if let Ok(mut entries) = fs::read_dir(path) {
+        return entries.next().is_some();
+    }
+    false
+}
+
+fn migrate_library(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_dir_all(from, to)?;
+    fs::remove_dir_all(from)
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +367,47 @@ mod tests {
             Path::new("/home")
         };
         assert!(path_is_on_mount(root, mount));
+    }
+
+    #[test]
+    fn default_library_root_prefers_documents_dir() {
+        let root = default_library_root();
+        let docs = dirs::document_dir().expect("documents dir");
+        let expected = docs.join("ClipForge");
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn migrates_legacy_library_to_target() {
+        let temp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let from = std::env::temp_dir().join(format!("clipforge-from-{temp_ns}"));
+        let to = std::env::temp_dir().join(format!("clipforge-to-{temp_ns}"));
+        fs::create_dir_all(&from).expect("from");
+        fs::write(from.join("settings.json"), "{}").expect("settings");
+        fs::create_dir_all(to.parent().unwrap()).expect("parent");
+        assert!(from.exists());
+        assert!(!to.exists());
+
+        migrate_library(&from, &to).expect("migrate");
+
+        assert!(!from.exists());
+        assert!(to.join("settings.json").exists());
+        assert!(library_has_content(&to));
+        let _ = fs::remove_dir_all(to);
+    }
+
+    #[test]
+    fn library_has_content_reports_empty_directory() {
+        let temp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("clipforge-hascontent-{temp_ns}"));
+        fs::create_dir_all(&dir).expect("dir");
+        assert!(!library_has_content(&dir));
+        let _ = fs::remove_dir_all(dir);
     }
 }
