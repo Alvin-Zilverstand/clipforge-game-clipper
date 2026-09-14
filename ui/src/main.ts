@@ -70,6 +70,7 @@ type DesktopStatus = {
   system_audio_available: boolean;
   desktop_duplication_available: boolean;
   auto_clip_enabled_events: AutoClipEventDto[];
+  auto_clip_disabled_games: string[];
   hotkey_clip_last_60s: string;
   hotkey_clip_last_30s: string;
   hotkey_toggle_session_recording: string;
@@ -79,6 +80,9 @@ type DesktopStatus = {
   capture_bitrate_kbps: number;
   capture_resolution: string;
   storage_limit_gb: number;
+  clip_directory: string;
+  storage_limit_exceeded: boolean;
+  auto_prune_old_clips: boolean;
   excluded_window_titles: string[];
   separate_audio_tracks: boolean;
   game_quality_overrides: GameQualityOverrideDto[];
@@ -177,6 +181,7 @@ type AppState = {
   screenshots: string[];
   uploadHistory: UploadHistoryEntry[];
   autoEvents: AutoEvent[];
+  disabledGames: string[];
   hotkeyClipLast60s: string;
   hotkeyClipLast30s: string;
   hotkeyToggleRecording: string;
@@ -186,6 +191,9 @@ type AppState = {
   captureBitrateKbps: number;
   captureResolution: string;
   storageLimitGb: number;
+  clipDirectory: string;
+  storageLimitExceeded: boolean;
+  autoPruneOldClips: boolean;
   excludedWindowTitles: string[];
   excludedWindowText: string;
   separateAudioTracks: boolean;
@@ -196,11 +204,22 @@ type AppState = {
   gameQualityOverrides: GameQualityOverrideDto[];
   effectiveQualityApplied: boolean;
   update: UpdateInfo;
+  modal: {
+    open: boolean;
+    kind: "clip" | "screenshot";
+    clipId: string;
+    screenshotPath: string;
+    videoFailed: boolean;
+    videoError: string;
+  };
 };
 
 type TauriGlobal = {
   core?: {
     invoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  };
+  event?: {
+    listen?: <T>(eventName: string, handler: (event: { payload: T }) => void) => Promise<() => void>;
   };
 };
 
@@ -267,6 +286,7 @@ const state: AppState = {
     { id: "dota-multi", gameId: "dota-2", eventType: "multi_kill", game: "Dota 2", event: "Multi-kill", enabled: true },
     { id: "dota-mvp", gameId: "dota-2", eventType: "mvp", game: "Dota 2", event: "MVP", enabled: true },
   ],
+  disabledGames: [],
   hotkeyClipLast60s: "F8",
   hotkeyClipLast30s: "Shift+F8",
   hotkeyToggleRecording: "Alt+F7",
@@ -276,10 +296,21 @@ const state: AppState = {
   captureBitrateKbps: 6000,
   captureResolution: "1280x720",
   storageLimitGb: 50,
+  clipDirectory: "",
+  storageLimitExceeded: false,
+  autoPruneOldClips: false,
   excludedWindowTitles: [],
   excludedWindowText: "",
   separateAudioTracks: false,
-  appVersion: "0.1.0",
+  appVersion: "0.1.1",
+  modal: {
+    open: false,
+    kind: "clip",
+    clipId: "",
+    screenshotPath: "",
+    videoFailed: false,
+    videoError: "",
+  },
   onboardingComplete: true,
   minimizeToTray: false,
   onboardingStep: 0,
@@ -336,8 +367,103 @@ function render() {
         ${renderActiveView(selectedClip)}
       </section>
     </main>
+    ${renderModal()}
   `;
   bindEvents();
+}
+
+function openClipModal(clipId: string) {
+  state.selectedClipId = clipId;
+  state.modal.open = true;
+  state.modal.kind = "clip";
+  state.modal.clipId = clipId;
+  state.modal.videoFailed = false;
+  state.modal.videoError = "";
+  render();
+}
+
+function openScreenshotModal(path: string) {
+  state.modal.open = true;
+  state.modal.kind = "screenshot";
+  state.modal.screenshotPath = path;
+  state.modal.videoFailed = false;
+  state.modal.videoError = "";
+  render();
+}
+
+function closeModal() {
+  state.modal.open = false;
+  render();
+}
+
+function renderModal() {
+  if (!state.modal.open) {
+    return "";
+  }
+
+  if (state.modal.kind === "screenshot") {
+    const path = state.modal.screenshotPath;
+    return `
+      <div class="modal-overlay" data-action="modal-backdrop">
+        <div class="modal" role="dialog" aria-modal="true" aria-label="Screenshot preview">
+          <div class="modal-header">
+            <h2>Screenshot preview</h2>
+            <button class="modal-close" data-action="modal-close" aria-label="Close">&times;</button>
+          </div>
+          <div class="modal-body">
+            <img src="${convertFileSrc(path)}" alt="Screenshot preview" />
+            <p class="muted file-path">${escapeHtml(path)}</p>
+            <div class="actions">
+              <button data-action="reveal-screenshot" data-screenshot-path="${escapeHtml(path)}">Open in Explorer</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  const clip = state.clips.find((candidate) => candidate.id === state.modal.clipId);
+  if (!clip) {
+    return "";
+  }
+  const durationDisplay = formatDuration(parseTimestamp(clip.duration));
+  const canPlay = Boolean(clip.videoUrl) && !state.modal.videoFailed;
+  return `
+    <div class="modal-overlay" data-action="modal-backdrop">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Clip preview">
+        <div class="modal-header">
+          <h2>${escapeHtml(clip.title)}</h2>
+          <button class="modal-close" data-action="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          ${
+            canPlay
+              ? `<video controls preload="metadata" autoplay src="${clip.videoUrl}" poster="${clip.thumbnailUrl ?? ""}" id="modal-video"></video>`
+              : `
+                <div class="video-error">
+                  <h3>Preview could not load</h3>
+                  <p class="muted">${escapeHtml(state.modal.videoError || "No preview is available for this clip.")}</p>
+                  <p class="muted file-path">${escapeHtml(clip.path || "No file path on record.")}</p>
+                  <div class="actions">
+                    <button data-action="modal-reveal">Reveal in Explorer</button>
+                    <button data-action="modal-retry">Try loading again</button>
+                  </div>
+                </div>
+              `
+          }
+          <p class="muted">${escapeHtml(clip.game)} · ${escapeHtml(clip.event)} · ${escapeHtml(clip.createdAt)} · ${escapeHtml(clip.uploadState)}</p>
+          <label>Trim start <input value="00:00" data-action="modal-trim-start" /></label>
+          <label>Trim end <input value="${escapeHtml(durationDisplay)}" data-action="modal-trim-end" /></label>
+          <div class="actions">
+            <button data-action="modal-trim">Trim</button>
+            <button data-action="modal-upload">Upload</button>
+            <button data-action="modal-reveal">Reveal</button>
+            <button data-action="modal-delete">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderOnboardingWizard() {
@@ -543,6 +669,7 @@ function renderScreenshotCard(path: string) {
       <h3>${escapeHtml(filename)}</h3>
       <p class="muted">${escapeHtml(path)}</p>
       <div class="actions">
+        <button data-action="open-modal-screenshot" data-screenshot-path="${escapeHtml(path)}">Preview</button>
         <button data-action="reveal-screenshot" data-screenshot-path="${escapeHtml(path)}">Open</button>
       </div>
     </article>
@@ -576,6 +703,9 @@ function renderClipCard(clip: Clip) {
       </div>
       <h3>${escapeHtml(clip.title)}</h3>
       <p>${escapeHtml(clip.game)} · ${escapeHtml(clip.source)} · ${escapeHtml(clip.duration)}</p>
+      <div class="actions">
+        <button data-action="open-modal-clip" data-clip-id="${clip.id}">Preview</button>
+      </div>
     </article>
   `;
 }
@@ -719,6 +849,12 @@ function renderRecordingView() {
 }
 
 function renderAutoClipView() {
+  const games: Array<{ gameId: string; game: string }> = [];
+  for (const event of state.autoEvents) {
+    if (!games.some((game) => game.gameId === event.gameId)) {
+      games.push({ gameId: event.gameId, game: event.game });
+    }
+  }
   return `
     <section class="table-panel">
       <div class="section-heading">
@@ -728,18 +864,40 @@ function renderAutoClipView() {
         </div>
         <div class="status-pill">Local APIs only</div>
       </div>
-      <div class="event-list">
-        ${state.autoEvents
-          .map(
-            (event) => `
-              <label class="event-row">
-                <span><strong>${escapeHtml(event.game)}</strong><small>${escapeHtml(event.event)}</small></span>
-                <input type="checkbox" ${event.enabled ? "checked" : ""} data-event-id="${event.id}" />
-              </label>
-            `,
-          )
-          .join("")}
+      <div class="actions auto-clip-global-actions">
+        <button data-action="auto-clip-enable-all">Enable all games</button>
+        <button data-action="auto-clip-disable-all">Disable all games</button>
+        <button data-action="auto-clip-restore">Restore defaults</button>
       </div>
+      ${games
+        .map((game) => {
+          const gameEvents = state.autoEvents.filter((event) => event.gameId === game.gameId);
+          const gameEnabled = !state.disabledGames.includes(game.gameId);
+          return `
+            <section class="auto-clip-group ${gameEnabled ? "" : "disabled"}">
+              <div class="auto-clip-group-head">
+                <label class="toggle">
+                  <input type="checkbox" ${gameEnabled ? "checked" : ""} data-game-id="${escapeHtml(game.gameId)}" data-action="toggle-game-clips" />
+                  <strong>${escapeHtml(game.game)}</strong>
+                </label>
+                <span class="status-pill">${gameEnabled ? "Clipping enabled" : "Clipping disabled"}</span>
+              </div>
+              <div class="event-list">
+                ${gameEvents
+                  .map(
+                    (event) => `
+                      <label class="event-row">
+                        <span><strong>${escapeHtml(event.event)}</strong></span>
+                        <input type="checkbox" ${event.enabled ? "checked" : ""} data-event-id="${event.id}" ${gameEnabled ? "" : "disabled"} />
+                      </label>
+                    `,
+                  )
+                  .join("")}
+              </div>
+            </section>
+          `;
+        })
+        .join("")}
       <div class="actions">
         <button data-action="write-gsi-configs">Write GSI Configs</button>
       </div>
@@ -858,7 +1016,17 @@ function renderSettingsView() {
             </select>
           </label>
         </div>
-        <label>Video bitrate (kbps) <input type="number" min="500" max="50000" step="500" value="${state.captureBitrateKbps}" data-action="capture-bitrate" /></label>
+        <label>Video bitrate preset
+            <select data-action="capture-bitrate-preset" aria-label="Bitrate preset">
+              <option value="2500" ${state.captureBitrateKbps <= 3500 ? "selected" : ""}>Low (2500)</option>
+              <option value="4500" ${state.captureBitrateKbps > 3500 && state.captureBitrateKbps <= 5500 ? "selected" : ""}>Medium (4500)</option>
+              <option value="6000" ${state.captureBitrateKbps > 5500 && state.captureBitrateKbps <= 8000 ? "selected" : ""}>Stream-ready (6000)</option>
+              <option value="10000" ${state.captureBitrateKbps > 8000 && state.captureBitrateKbps <= 12000 ? "selected" : ""}>High (10000)</option>
+              <option value="14000" ${state.captureBitrateKbps > 12000 ? "selected" : ""}>Ultra (14000)</option>
+              <option value="custom" ${state.captureBitrateKbps < 2500 || state.captureBitrateKbps > 14000 ? "selected" : ""}>Custom…</option>
+            </select>
+          </label>
+          <label>Custom bitrate (kbps) <input type="number" min="500" max="50000" step="500" value="${state.captureBitrateKbps}" data-action="capture-bitrate" /></label>
         <label>Buffer storage cap (GB) <input type="number" min="5" max="5000" step="1" value="${state.storageLimitGb}" data-action="capture-storage-gb" /></label>
         <label>Excluded window titles
           <textarea rows="2" placeholder="comma separated, e.g. Brave, Discord - Settings" data-action="excluded-windows">${escapeHtml(state.excludedWindowText)}</textarea>
@@ -868,8 +1036,15 @@ function renderSettingsView() {
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Storage</p>
-        <h2>${state.storageLimitGb} GB buffer cap</h2>
-        <p class="muted">Old temporary buffer segments are removed automatically once the buffer reaches the cap; saved clips are kept.</p>
+        <h2>Clips & replay buffer</h2>
+        <label>Clip folder
+          <input value="${escapeHtml(state.clipDirectory)}" data-action="clip-directory" spellcheck="false" placeholder="C:\\Users\\You\\Videos\\Clips" />
+        </label>
+        <button data-action="change-clip-dir">Apply Clip Folder</button>
+        ${state.storageLimitExceeded ? `<p class="warn">The saved library is currently above the ${state.storageLimitGb} GB limit.</p>` : ""}
+        <label class="toggle"><input type="checkbox" ${state.autoPruneOldClips ? "checked" : ""} data-action="toggle-auto-prune" /> Auto-delete oldest clips when the library exceeds the ${state.storageLimitGb} GB limit</label>
+        <p class="muted">${state.autoPruneOldClips ? "When the limit is exceeded, the oldest automatic/event/session clips are deleted (oldest first) until you are back under it. Clips you saved manually are never auto-deleted." : "Up to the limit, the rolling replay buffer is always pruned automatically to keep it from growing. Saved clips are kept. Enable auto-cleanup above to also trim oldest clips when the limit is exceeded."}</p>
+        <p class="muted">This limit is set in Capture Settings (buffer storage cap).</p>
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Tray</p>
@@ -883,9 +1058,8 @@ function renderSettingsView() {
         <p class="muted">${escapeHtml(state.update.message)}</p>
         ${state.update.updateAvailable ? `
           <button data-action="download-update" ${state.update.applying ? "disabled" : ""}>Download & install v${escapeHtml(state.update.latestVersion)}</button>
-        ` : `
-          <button data-action="check-updates" ${state.update.applying ? "disabled" : ""}>Check for updates</button>
-        `}
+        ` : ""}
+        <button data-action="check-updates" ${state.update.applying ? "disabled" : ""}>${state.update.checked ? "Check for updates again" : "Check for updates"}</button>
         <button data-action="reveal-crash-logs">Reveal Crash Logs</button>
       </article>
       <article class="settings-panel">
@@ -1068,6 +1242,30 @@ function bindEvents() {
     });
   });
 
+  appRoot.querySelectorAll<HTMLInputElement>("[data-action='toggle-game-clips']").forEach((input) => {
+    input.addEventListener("change", () => {
+      const gameId = input.dataset.gameId;
+      if (gameId) {
+        state.disabledGames = input.checked
+          ? state.disabledGames.filter((game) => game !== gameId)
+          : [...state.disabledGames, gameId];
+        void invokeSetGameAutoClipEnabled(gameId, input.checked);
+      }
+    });
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='auto-clip-enable-all']")?.addEventListener("click", () => {
+    void invokeAutoClipBulk("enable_all_auto_clips");
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='auto-clip-disable-all']")?.addEventListener("click", () => {
+    void invokeAutoClipBulk("disable_all_auto_clips");
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='auto-clip-restore']")?.addEventListener("click", () => {
+    void invokeAutoClipBulk("restore_default_auto_clips");
+  });
+
   appRoot.querySelector<HTMLInputElement>("[data-action='hotkey-clip-60s']")?.addEventListener("change", (event) => {
     state.hotkeyClipLast60s = (event.target as HTMLInputElement).value;
   });
@@ -1093,7 +1291,19 @@ function bindEvents() {
   });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='capture-bitrate']")?.addEventListener("input", (event) => {
-    state.captureBitrateKbps = Number((event.target as HTMLInputElement).value);
+      state.captureBitrateKbps = Number((event.target as HTMLInputElement).value);
+    });
+
+  appRoot.querySelector<HTMLSelectElement>("[data-action='capture-bitrate-preset']")?.addEventListener("change", (event) => {
+    const preset = (event.target as HTMLSelectElement).value;
+    if (preset !== "custom") {
+      const value = Number(preset);
+      state.captureBitrateKbps = value;
+      const input = appRoot.querySelector<HTMLInputElement>("[data-action='capture-bitrate']");
+      if (input) {
+        input.value = String(value);
+      }
+    }
   });
 
   appRoot.querySelector<HTMLInputElement>("[data-action='capture-storage-gb']")?.addEventListener("input", (event) => {
@@ -1114,6 +1324,18 @@ function bindEvents() {
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='check-updates']")?.addEventListener("click", () => {
     void checkForUpdates();
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='clip-directory']")?.addEventListener("input", (event) => {
+    state.clipDirectory = (event.target as HTMLInputElement).value;
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='change-clip-dir']")?.addEventListener("click", () => {
+    void changeClipDirectory();
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='toggle-auto-prune']")?.addEventListener("change", (event) => {
+    void setAutoPruneEnabled((event.target as HTMLInputElement).checked);
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='save-override']")?.addEventListener("click", () => {
@@ -1148,6 +1370,63 @@ function bindEvents() {
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='reveal-crash-logs']")?.addEventListener("click", () => {
     void revealCrashLogs();
+  });
+
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-action='open-modal-clip']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const clipId = button.dataset.clipId;
+      if (clipId) {
+        openClipModal(clipId);
+      }
+    });
+  });
+
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-action='open-modal-screenshot']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const path = button.dataset.screenshotPath;
+      if (path) {
+        openScreenshotModal(path);
+      }
+    });
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-close']")?.addEventListener("click", closeModal);
+
+  appRoot.querySelector<HTMLElement>("[data-action='modal-backdrop']")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) {
+      closeModal();
+    }
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-trim']")?.addEventListener("click", () => {
+    void trimClipFromModal();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-upload']")?.addEventListener("click", () => {
+    state.selectedClipId = state.modal.clipId;
+    void uploadSelectedClip();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-reveal']")?.addEventListener("click", () => {
+    state.selectedClipId = state.modal.clipId;
+    void revealSelectedClip();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-delete']")?.addEventListener("click", () => {
+    state.selectedClipId = state.modal.clipId;
+    void deleteSelectedClip();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='modal-retry']")?.addEventListener("click", () => {
+    state.modal.videoFailed = false;
+    state.modal.videoError = "";
+    render();
+  });
+
+  appRoot.querySelector<HTMLVideoElement>("#modal-video")?.addEventListener("error", () => {
+    state.modal.videoFailed = true;
+    state.modal.videoError = "The clip file could not be loaded as a preview. It may have been moved or deleted, or the media table of contents is unreadable.";
+    render();
   });
 
   appRoot.querySelectorAll<HTMLButtonElement>("[data-action='reveal-screenshot']").forEach((button) => {
@@ -1373,17 +1652,27 @@ async function saveClip() {
 }
 
 async function toggleRecording() {
+  const wasActive = state.captureActive;
+  // Optimistically flip the button so the UI reacts instantly; the real status
+  // returned by the backend reconciles it (or it is rolled back on error).
+  state.captureActive = !wasActive;
+  state.recordingState = state.captureActive ? "RecordingSession" : "Buffering";
+  render();
+
   if (tauriInvoke) {
     try {
-      const status = await tauriInvoke<DesktopStatus>(state.captureActive ? "stop_capture" : "start_capture");
+      const status = await tauriInvoke<DesktopStatus>(wasActive ? "stop_capture" : "start_capture");
       applyDesktopStatus(status);
       await refreshClips();
       showNotice(state.captureActive ? "Recording started" : "Recording stopped");
       render();
       return;
     } catch (error) {
+      state.captureActive = wasActive;
+      state.recordingState = wasActive ? "RecordingSession" : "Buffering";
       console.error("Could not toggle desktop recording", error);
       showNotice(`Could not toggle recording: ${String(error)}`);
+      render();
     }
   }
 
@@ -1415,6 +1704,7 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.ffmpegPath = status.ffmpeg_path;
   state.systemAudioAvailable = status.system_audio_available;
   state.desktopDuplicationAvailable = status.desktop_duplication_available;
+  state.disabledGames = status.auto_clip_disabled_games ?? [];
   for (const event of state.autoEvents) {
     const enabled = status.auto_clip_enabled_events.find(
       (candidate) => candidate.game_id === event.gameId && candidate.event_type === event.eventType,
@@ -1432,6 +1722,11 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.captureBitrateKbps = status.capture_bitrate_kbps;
   state.captureResolution = status.capture_resolution;
   state.storageLimitGb = status.storage_limit_gb;
+  state.clipDirectory = status.clip_directory ?? state.clipDirectory;
+  state.storageLimitExceeded = status.storage_limit_exceeded ?? false;
+  if (typeof status.auto_prune_old_clips === "boolean") {
+    state.autoPruneOldClips = status.auto_prune_old_clips;
+  }
   state.excludedWindowTitles = status.excluded_window_titles ?? [];
   state.excludedWindowText = (status.excluded_window_titles ?? []).join(", ");
 state.separateAudioTracks = status.separate_audio_tracks ?? false;
@@ -1473,6 +1768,39 @@ async function trimSelectedClip() {
     await refreshClips();
     showNotice("Trimmed clip created");
     render();
+  } catch (error) {
+    console.error("Could not trim clip", error);
+    showNotice(`Could not trim clip: ${String(error)}`);
+  }
+}
+
+async function trimClipFromModal() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  const clip = state.clips.find((candidate) => candidate.id === state.modal.clipId);
+  if (!clip) {
+    return;
+  }
+
+  const startInput = appRoot.querySelector<HTMLInputElement>("[data-action='modal-trim-start']");
+  const endInput = appRoot.querySelector<HTMLInputElement>("[data-action='modal-trim-end']");
+  const startSeconds = parseTimestamp(startInput?.value ?? "0");
+  const endSeconds = parseTimestamp(endInput?.value ?? clip.duration);
+
+  try {
+    const dto = await tauriInvoke<ClipDto>("trim_clip", {
+      clipId: clip.id,
+      startSeconds,
+      endSeconds,
+    });
+    const trimmed = clipFromDto(dto);
+    state.clips.unshift(trimmed);
+    state.selectedClipId = trimmed.id;
+    await refreshClips();
+    showNotice("Trimmed clip created");
+    closeModal();
   } catch (error) {
     console.error("Could not trim clip", error);
     showNotice(`Could not trim clip: ${String(error)}`);
@@ -1731,23 +2059,36 @@ async function refreshAudioDevices() {
   }
 }
 
-async function pollAutoClips() {
-  if (!tauriInvoke || !state.captureActive || !state.onboardingComplete) {
+async function onClipSaved() {
+  if (!tauriInvoke || !state.onboardingComplete) {
     return;
   }
 
   try {
-    const clips = await tauriInvoke<ClipDto[]>("poll_auto_clip_events");
-    if (clips.length === 0) {
-      return;
+    await refreshClips();
+    const newest = state.clips[0];
+    if (newest) {
+      state.selectedClipId = newest.id;
+      state.activeView = "Library";
+      render();
+    } else {
+      render();
     }
-    const created = clips.map(clipFromDto);
-    state.clips = [...created, ...state.clips.filter((clip) => !created.some((fresh) => fresh.id === clip.id))];
-    state.selectedClipId = created[0].id;
-    state.activeView = "Library";
+  } catch (error) {
+    console.warn("Could not refresh clips after save event", error);
+  }
+}
+
+async function onClipDeleted() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    await refreshClips();
     render();
   } catch (error) {
-    console.warn("Could not poll auto clips", error);
+    console.warn("Could not refresh clips after delete event", error);
   }
 }
 
@@ -1795,6 +2136,36 @@ async function saveAutoClipEventSetting(eventRule: AutoEvent) {
   } catch (error) {
     console.warn("Could not save auto-clip rule", error);
     showNotice(`Could not save auto-clip rule: ${String(error)}`);
+  }
+}
+
+async function invokeSetGameAutoClipEnabled(gameId: string, enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_game_auto_clip_enabled", { gameId, enabled });
+    applyDesktopStatus(status);
+    showNotice(enabled ? "Auto-clipping enabled for game" : "Auto-clipping disabled for game");
+    render();
+  } catch (error) {
+    console.warn("Could not update per-game auto-clip setting", error);
+    showNotice(`Could not update per-game auto-clip setting: ${String(error)}`);
+  }
+}
+
+async function invokeAutoClipBulk(command: "enable_all_auto_clips" | "disable_all_auto_clips" | "restore_default_auto_clips") {
+  if (!tauriInvoke) {
+    return;
+  }
+  try {
+    const status = await tauriInvoke<DesktopStatus>(command);
+    applyDesktopStatus(status);
+    showNotice("Auto-clip rules updated");
+    render();
+  } catch (error) {
+    console.warn("Could not update auto-clip rules", error);
+    showNotice(`Could not update auto-clip rules: ${String(error)}`);
   }
 }
 
@@ -1846,6 +2217,37 @@ async function saveCaptureSettings() {
   } catch (error) {
     console.warn("Could not save capture settings", error);
     showNotice(`Could not save capture settings: ${String(error)}`);
+  }
+}
+
+async function changeClipDirectory() {
+  if (!tauriInvoke) {
+    return;
+  }
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_clip_directory", {
+      clipDir: state.clipDirectory.trim(),
+    });
+    applyDesktopStatus(status);
+    showNotice("Clip folder applied.");
+    render();
+  } catch (error) {
+    console.warn("Could not set clip folder", error);
+    showNotice(`Could not set clip folder: ${String(error)}`);
+  }
+}
+
+async function setAutoPruneEnabled(enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_auto_prune_enabled", { enabled });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not update auto-cleanup setting", error);
+    showNotice(`Could not update auto-cleanup setting: ${String(error)}`);
   }
 }
 
@@ -2175,9 +2577,29 @@ async function loadDesktopBridge() {
     window.setInterval(() => {
       void refreshStatus();
     }, 3_000);
+    // Hotkey screenshots are taken behind Tauri's back, so keep a light poll to
+    // pick up new ones; clip/library changes arrive via backend events instead.
     window.setInterval(() => {
-      void pollAutoClips();
-    }, 2_000);
+      void refreshScreenshots();
+    }, 5_000);
+    const listen = window.__TAURI__?.event?.listen;
+    if (listen) {
+      void listen("clip-saved", () => {
+        void onClipSaved();
+      });
+      void listen("clip-deleted", () => {
+        void onClipDeleted();
+      });
+      void listen("screenshots-changed", () => {
+        void refreshScreenshots();
+      });
+    }
+
+    window.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && state.modal.open) {
+        closeModal();
+      }
+    });
   } catch (error) {
     console.warn("Tauri bridge unavailable", error);
   }

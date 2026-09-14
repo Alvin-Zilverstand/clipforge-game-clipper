@@ -23,6 +23,18 @@ impl LibraryPaths {
         }
     }
 
+    /// Builds paths while honoring a user-selected clip directory. Thumbs,
+    /// sessions, and the rolling buffer stay under the library root.
+    pub fn with_clip_root(root: impl Into<PathBuf>, clip_root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        Self {
+            clip_root: clip_root.into(),
+            thumbs_root: root.join("thumbs"),
+            sessions_root: root.join("sessions"),
+            buffer_root: root.join("buffer"),
+        }
+    }
+
     pub fn ensure(&self) -> io::Result<()> {
         fs::create_dir_all(&self.clip_root)?;
         fs::create_dir_all(&self.thumbs_root)?;

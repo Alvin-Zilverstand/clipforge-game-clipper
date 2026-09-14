@@ -112,10 +112,20 @@ pub fn build_update_check(
     release: &GitHubRelease,
 ) -> Result<UpdateCheck, UpdateCheckError> {
     let latest_version = normalize_version(&release.tag_name);
-    let update_available = compare_versions(current_version, &latest_version) == Ordering::Less;
+    let newer_release_exists = compare_versions(current_version, &latest_version) == Ordering::Less;
     let installer = select_installer_asset(&release.assets);
 
-    let message = if update_available {
+    // A newer tag without a published installer is not something the user can
+    // download, so never claim the app is installable in that state.
+    let update_available = newer_release_exists && installer.is_some();
+
+    let message = if !newer_release_exists {
+        "You are on the latest version.".to_string()
+    } else if installer.is_none() {
+        format!(
+            "A newer version ({latest_version}) exists, but no installer has been published for it yet."
+        )
+    } else {
         let file = installer
             .as_ref()
             .map(|asset| asset.name.as_str())
@@ -123,8 +133,6 @@ pub fn build_update_check(
         format!(
             "A newer version ({latest_version}) is available — {file}, ready to download."
         )
-    } else {
-        "You are on the latest version.".to_string()
     };
 
     Ok(UpdateCheck {
@@ -215,6 +223,79 @@ mod tests {
     fn old_version_is_not_newer() {
         assert_eq!(compare_versions("0.2.0", "0.1.0"), Ordering::Greater);
         assert_eq!(compare_versions("0.3.0", "0.3.0"), Ordering::Equal);
+    }
+
+    #[test]
+    fn installed_040_detects_published_050_as_available_update() {
+        let release = GitHubRelease {
+            tag_name: "v0.0.5".to_string(),
+            published_at: Some("2026-09-08T00:00:00Z".to_string()),
+            body: None,
+            assets: vec![GitHubAsset {
+                name: "ClipForge_0.1.1_x64_en-US.msi".to_string(),
+                size: Some(1_000_000),
+                browser_download_url: "https://example.test/ClipForge_0.1.1.msi".to_string(),
+            }],
+        };
+        let check = build_update_check("0.0.4", &release).expect("check");
+
+        assert!(check.update_available, "v0.0.4 must see v0.0.5 as an update");
+        assert_eq!(check.latest_version, "0.0.5");
+        assert_eq!(
+            check.installer_file.as_deref(),
+            Some("ClipForge_0.1.1_x64_en-US.msi")
+        );
+    }
+
+    #[test]
+    fn same_version_is_reported_as_up_to_date() {
+        let release = GitHubRelease {
+            tag_name: "v0.1.1".to_string(),
+            published_at: None,
+            body: None,
+            assets: vec![GitHubAsset {
+                name: "ClipForge_0.1.1_x64-setup.exe".to_string(),
+                size: None,
+                browser_download_url: "https://example.test/setup.exe".to_string(),
+            }],
+        };
+        let check = build_update_check("0.1.1", &release).expect("check");
+
+        assert!(!check.update_available);
+        assert_eq!(check.message, "You are on the latest version.");
+    }
+
+    #[test]
+    fn newer_tag_without_installer_is_not_offered_for_download() {
+        let release = GitHubRelease {
+            tag_name: "v0.9.0".to_string(),
+            published_at: Some("2026-09-09T00:00:00Z".to_string()),
+            body: Some("notes".to_string()),
+            assets: vec![GitHubAsset {
+                name: "checksums.txt".to_string(),
+                size: Some(128),
+                browser_download_url: "https://example.test/checksums.txt".to_string(),
+            }],
+        };
+        let check = build_update_check("0.1.1", &release).expect("check");
+
+        assert!(!check.update_available);
+        assert!(check.download_url.is_none());
+        assert!(check.message.contains("no installer has been published"));
+    }
+
+    #[test]
+    fn patch_versions_compare_numerically_not_lexically() {
+        assert_eq!(compare_versions("0.0.9", "0.0.10"), Ordering::Less);
+        assert_eq!(compare_versions("0.0.10", "0.0.10"), Ordering::Equal);
+        assert_eq!(compare_versions("0.0.11", "0.0.10"), Ordering::Greater);
+        assert_eq!(compare_versions("0.1.0", "0.1.1"), Ordering::Less);
+    }
+
+    #[test]
+    fn older_tag_backports_do_not_mask_newer_release() {
+        assert_eq!(compare_versions("0.2.0", "0.1.1"), Ordering::Greater);
+        assert_eq!(compare_versions("0.1.1", "0.2.0"), Ordering::Less);
     }
 
     #[test]

@@ -47,7 +47,10 @@ pub struct AutoClipSettings {
     pub pre_roll: Duration,
     pub post_roll: Duration,
     pub merge_window: Duration,
+    #[serde(default)]
     pub enabled_events_by_game: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    pub disabled_games: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +98,8 @@ pub struct AppSettings {
     pub onboarding_complete: bool,
     #[serde(default)]
     pub minimize_to_tray_enabled: bool,
+    #[serde(default)]
+    pub auto_prune_old_clips: bool,
 }
 
 impl AppSettings {
@@ -138,11 +143,13 @@ impl AppSettings {
                 post_roll: Duration::from_secs(8),
                 merge_window: Duration::from_secs(12),
                 enabled_events_by_game: BTreeMap::new(),
+                disabled_games: BTreeSet::new(),
             },
             upload: UploadSettings::default(),
             quality_overrides_by_game: BTreeMap::new(),
             onboarding_complete: false,
             minimize_to_tray_enabled: false,
+            auto_prune_old_clips: false,
         }
     }
 

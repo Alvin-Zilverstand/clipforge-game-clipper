@@ -59,6 +59,19 @@
 - An opt-in "Minimize to tray" setting keeps ClipForge running in the system tray when the main window is closed; closing the window hides it, and the tray menu offers "Open ClipForge" to restore it or "Quit ClipForge" to exit fully. The toggle is under Settings > Tray and defaults to off.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
+- Versions are bumped to `0.1.1` across root `Cargo.toml`, `src-tauri/Cargo.toml`, `tauri.conf.json`, `package.json`, and the frontend `appVersion` constant.
+- The updater now requires both a newer release and a published installer asset before offering a download; the UI always shows "Check for updates" and only shows a Download button when an installer is available.
+- The clip folder can be changed at runtime via `set_clip_directory`; the library root and asset-protocol scope are rebuilt without restarting the app.
+- An optional auto-prune toggle deletes the oldest non-manual clips once the saved library exceeds the configured storage limit.
+- Free disk space and storage-limit status are cached for 10 seconds, reducing repeated FS calls from the background and UI polls.
+- A RAM-backed clip buffer (512 MB cap) keeps recent segments in memory and merges them with disk segments when manual, auto, or hotkey clips are saved; this lowers disk I/O and lets clips span RAM-only material.
+- Clip-related commands (`save_manual_clip`, `start_capture`, `stop_capture`, `trim_clip`, `upload_clip`, `take_screenshot`) now run as async Tauri commands so they execute off the main thread.
+- The recording toggle flips optimistically in the UI and rolls back on error.
+- The backend emits `clip-saved`, `clip-deleted`, `screenshots-changed`, and `storage-cleanup` events; the UI listens for them and refreshes clips and screenshots on demand.
+- A modal viewer opens for clips and screenshots; when a clip's MP4 cannot load, the modal shows the file path and a Reveal-in-Explorer button instead of a broken `<video>` element.
+- Bitrate settings now offer a preset dropdown (Low / Medium / Stream-ready / High / Ultra) plus a custom numeric input.
+- Auto Clip rules are displayed per game with an Enable / Disable toggle per game, plus Enable all / Disable all / Restore defaults buttons.
+- The app icon source is now a checked-in SVG (`src-tauri/icons/icon.svg`); all platform raster icons and `icon.ico` are regenerated from a 1024×1024 PNG rendered from that SVG.
 
 ## Not Fully Working Yet
 
@@ -68,11 +81,13 @@
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
 - Auto-update requires a GitHub release whose tag is newer than the running app version and that ships MSI/NSIS assets (the existing `v0.0.1` release carries 0.1.0 assets, so it correctly reports up to date).
+- RAM-backed clipping reduces disk churn but cannot eliminate it entirely; FFmpeg still writes final clips to disk, and very large segment histories may briefly exceed the RAM cap before pruning.
+- SVG icon rasterization depends on the sharp-based tooling used during development; the generated `icon.ico` and PNGs are checked in so normal builds do not require it.
 
 ## Next Engineering Steps
 
 1. Add per-process loopback capture so individual application audio can be captured independently of the system mix.
 2. Add per-player kill/death/objective event detection for Dota 2 and other Source titles beyond the current match-level transitions.
-3. Exercise the GitHub Actions release workflow with a real tag push and verify the published assets appear in a GitHub Release.
-4. Split the recorder service into a separate background process so capture survives app restarts.
-5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.
+3. Split the recorder service into a separate background process so capture survives app restarts.
+4. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.
+5. Exercise the GitHub Actions release workflow with the `v0.1.1` tag push and verify the published assets appear in a GitHub Release.

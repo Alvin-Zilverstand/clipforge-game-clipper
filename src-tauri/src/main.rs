@@ -16,8 +16,7 @@ use clipforge::integrations::{
     LeagueLiveClientPoller, RawGameEvent, ValveGsiIntegration,
 };
 use clipforge::media::{
-    collect_segments, concat_segments, generate_thumbnail, prune_old_segments, recent_segments,
-    trim_clip as ffmpeg_trim_clip,
+    concat_segments, generate_thumbnail, trim_clip as ffmpeg_trim_clip,
 };
 use clipforge::models::{Clip, ClipSource, GameEvent, RecordingStatus};
 use clipforge::native_audio::{
@@ -26,6 +25,10 @@ use clipforge::native_audio::{
 };
 use clipforge::native_wgc::NativeWgcReplayCaptureBackend;
 use clipforge::proc::hidden_command;
+use clipforge::ram_buffer::{
+    collect_disk_segments, merged_segments, spool_merged, RamReplayBuffer,
+    DEFAULT_RAM_CAP_BYTES,
+};
 use clipforge::recorder::{RecorderAction, RecorderService};
 use clipforge::settings::{load_or_create_settings, save_settings, AppSettings};
 use clipforge::storage::{clip_path, is_inside_root, resolve_library_root, LibraryPaths};
@@ -37,7 +40,7 @@ use serde::Serialize;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -45,7 +48,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 struct AppRuntime {
     library_root: PathBuf,
@@ -56,9 +59,21 @@ struct AppRuntime {
     valve_events: Mutex<Vec<RawGameEvent>>,
     hotkey_shortcuts: Mutex<Option<HotkeyShortcuts>>,
     app_handle: Mutex<Option<tauri::AppHandle>>,
+    metrics: Mutex<MetricCache>,
+    ram_buffer: Mutex<RamReplayBuffer>,
+    ram_staging_dir: PathBuf,
     capture_capabilities: OnceLock<CaptureCapabilities>,
     quitting: AtomicBool,
 }
+
+/// Coarse caches so the frequent status poll never re-scans the disk or
+/// refreshes sysinfo on the UI thread. Values expire after `METRIC_CACHE_TTL`.
+struct MetricCache {
+    free_disk_gb: Option<(std::time::Instant, f64)>,
+    storage_limit_exceeded: Option<(std::time::Instant, bool)>,
+}
+
+const METRIC_CACHE_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct CaptureCapabilities {
@@ -156,6 +171,7 @@ struct DesktopStatus {
     system_audio_available: bool,
     desktop_duplication_available: bool,
     auto_clip_enabled_events: Vec<AutoClipEventDto>,
+    auto_clip_disabled_games: Vec<String>,
     hotkey_clip_last_60s: String,
     hotkey_clip_last_30s: String,
     hotkey_toggle_session_recording: String,
@@ -165,6 +181,9 @@ struct DesktopStatus {
     capture_bitrate_kbps: u32,
     capture_resolution: String,
     storage_limit_gb: u64,
+    clip_directory: String,
+    storage_limit_exceeded: bool,
+    auto_prune_old_clips: bool,
     excluded_window_titles: Vec<String>,
     separate_audio_tracks: bool,
     game_quality_overrides: Vec<GameQualityOverrideDto>,
@@ -234,7 +253,7 @@ struct AutoClipEventDto {
 fn get_status(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -273,7 +292,7 @@ fn refresh_detected_game_inner(runtime: &AppRuntime) -> Result<DesktopStatus, St
 
         if !should_auto_start {
             if !should_auto_stop {
-                return Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities));
+                return Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()));
             }
         }
     }
@@ -299,7 +318,7 @@ fn set_replay_buffer(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<Des
     recorder.settings.clamp_replay_buffer();
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -309,7 +328,7 @@ fn set_mic_enabled(enabled: bool, runtime: State<'_, AppRuntime>) -> Result<Desk
     recorder.settings.privacy.mic_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -322,7 +341,7 @@ fn set_system_audio_enabled(
     recorder.settings.privacy.system_audio_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -368,7 +387,7 @@ fn set_mic_device(
     recorder.settings.privacy.mic_device = device.filter(|value| !value.trim().is_empty());
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -381,7 +400,7 @@ fn set_auto_record_enabled(
     recorder.settings.privacy.desktop_capture_requires_confirmation = !enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -394,7 +413,7 @@ fn set_minimize_to_tray_enabled(
     recorder.settings.minimize_to_tray_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -426,7 +445,7 @@ fn set_upload_settings(
     recorder.settings.upload.custom_headers = parse_header_lines(&custom_headers.join("\n"));
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save upload settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -439,20 +458,89 @@ fn set_auto_clip_event_enabled(
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     let defaults = default_auto_clip_events_for_game(&game_id);
-    let events = recorder
-        .settings
-        .auto_clip
-        .enabled_events_by_game
-        .entry(game_id)
-        .or_insert_with(|| defaults.iter().map(|event| (*event).to_string()).collect());
+    {
+        let events = recorder
+            .settings
+            .auto_clip
+            .enabled_events_by_game
+            .entry(game_id.clone())
+            .or_insert_with(|| defaults.iter().map(|event| (*event).to_string()).collect());
+        if enabled {
+            events.insert(event_type);
+        } else {
+            events.remove(&event_type);
+        }
+    }
     if enabled {
-        events.insert(event_type);
-    } else {
-        events.remove(&event_type);
+        recorder.settings.auto_clip.disabled_games.remove(&game_id);
     }
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_game_auto_clip_enabled(
+    game_id: String,
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    if enabled {
+        recorder.settings.auto_clip.disabled_games.remove(&game_id);
+    } else {
+        recorder.settings.auto_clip.disabled_games.insert(game_id);
+    }
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+fn known_auto_clip_game_ids() -> Vec<&'static str> {
+    ["league-of-legends", "counter-strike-2", "dota-2"].to_vec()
+}
+
+#[tauri::command]
+fn enable_all_auto_clips(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.auto_clip.disabled_games.clear();
+    for game_id in known_auto_clip_game_ids() {
+        let defaults = default_auto_clip_events_for_game(game_id);
+        recorder
+            .settings
+            .auto_clip
+            .enabled_events_by_game
+            .entry(game_id.to_string())
+            .or_insert_with(|| defaults.iter().map(|event| (*event).to_string()).collect());
+    }
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn disable_all_auto_clips(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    for game_id in known_auto_clip_game_ids() {
+        recorder.settings.auto_clip.disabled_games.insert(game_id.to_string());
+    }
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn restore_default_auto_clips(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.auto_clip.disabled_games.clear();
+    recorder.settings.auto_clip.enabled_events_by_game.clear();
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -478,7 +566,56 @@ fn set_capture_settings(
     recorder.settings.privacy.separate_audio_tracks = separate_audio_tracks;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save capture settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_clip_directory(
+    clip_dir: String,
+    app: tauri::AppHandle,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let clean = clip_dir.trim();
+    if clean.is_empty() {
+        return Err("Clip folder cannot be empty.".to_string());
+    }
+    let new_dir = Path::new(clean);
+    if !new_dir.is_absolute() {
+        return Err("Clip folder must be an absolute path.".to_string());
+    }
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    if capture.is_some() {
+        return Err("Stop recording before changing the clip folder.".to_string());
+    }
+    recorder.paths = LibraryPaths::with_clip_root(
+        PathBuf::from(&runtime.library_root),
+        new_dir.to_path_buf(),
+    );
+    recorder
+        .paths
+        .ensure()
+        .map_err(|error| format!("Could not create clip folder: {error}"))?;
+    recorder.settings.clip_root = new_dir.to_path_buf();
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    // The custom folder must remain servable by the asset protocol even when
+    // it lives outside the default library directory.
+    let _ = app.asset_protocol_scope().allow_directory(new_dir, true);
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_auto_prune_enabled(
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.auto_prune_old_clips = enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -515,7 +652,7 @@ fn finish_onboarding(
     recorder.settings.onboarding_complete = true;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save onboarding settings: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 fn even_between(value: u32, min: u32, max: u32) -> u32 {
@@ -604,11 +741,14 @@ fn poll_auto_clip_events_inner(runtime: &AppRuntime) -> Result<Vec<ClipDto>, Str
             }
         }
     }
+    if !created.is_empty() {
+        emit_event(runtime, "clip-saved", created.len());
+    }
     Ok(created)
 }
 
 #[tauri::command]
-fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
+async fn save_manual_clip(seconds: u64, runtime: State<'_, AppRuntime>) -> Result<ClipDto, String> {
     save_manual_clip_inner(seconds, runtime.inner())
 }
 
@@ -621,17 +761,6 @@ fn save_manual_clip_inner(seconds: u64, runtime: &AppRuntime) -> Result<ClipDto,
     let ffmpeg = find_ffmpeg_executable()
         .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
     let now = SystemTime::now();
-    let segment_paths = recent_segments(
-        &active.buffer_dir,
-        Duration::from_secs(seconds),
-        active.segment_duration,
-        now,
-    )
-    .map_err(|error| error.to_string())?;
-    if segment_paths.is_empty() {
-        return Err("The replay buffer has not produced any segments yet.".to_string());
-    }
-
     let action = recorder
         .save_manual_clip(Duration::from_secs(seconds), now)
         .ok_or_else(|| "No active recording session is available.".to_string())?;
@@ -648,26 +777,29 @@ fn save_manual_clip_inner(seconds: u64, runtime: &AppRuntime) -> Result<ClipDto,
         .cloned()
         .ok_or_else(|| "Created clip was not found in the library.".to_string())?;
 
-    if let Err(error) = concat_segments(&ffmpeg, &segment_paths, &clip.path) {
+    if concat_union_segments(
+        runtime,
+        active,
+        &ffmpeg,
+        Some(Duration::from_secs(seconds)),
+        &clip.path,
+    )? == 0
+    {
         recorder.library.remove_clip(&clip.id);
         if let Ok(database) = runtime.database.lock() {
             let _ = database.delete_clip(&clip.id);
         }
-        return Err(error.to_string());
+        return Err("The replay buffer has not produced any segments yet.".to_string());
     }
     if let Some(thumbnail_path) = &clip.thumbnail_path {
         let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
     }
-    let _ = prune_old_segments(
-        &active.buffer_dir,
-        recorder.settings.replay_buffer,
-        active.segment_duration,
-    );
     let mut clip = clip;
     maybe_auto_upload_clip(runtime, &mut recorder, &mut clip);
     recorder.library.add_clip(clip.clone());
     persist_clip(runtime, &clip)?;
     save_manifest(&recorder)?;
+    emit_event(runtime, "clip-saved", clip.id.clone());
     Ok(clip_to_dto(&clip))
 }
 
@@ -683,16 +815,6 @@ fn handle_auto_event_inner(
     let ffmpeg = find_ffmpeg_executable()
         .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
     let clip_window = recorder.settings.auto_clip.pre_roll + recorder.settings.auto_clip.post_roll;
-    let segment_paths = recent_segments(
-        &active.buffer_dir,
-        clip_window,
-        active.segment_duration,
-        SystemTime::now(),
-    )
-    .map_err(|error| error.to_string())?;
-    if segment_paths.is_empty() {
-        return Ok(None);
-    }
 
     if !auto_clip_event_enabled(&recorder.settings, &event.game_id, &event.event_type.to_string()) {
         return Ok(None);
@@ -710,13 +832,13 @@ fn handle_auto_event_inner(
         .cloned()
         .ok_or_else(|| "Created auto clip was not found in the library.".to_string())?;
 
-    if let Err(error) = concat_segments(&ffmpeg, &segment_paths, &clip.path) {
+    if concat_union_segments(runtime, active, &ffmpeg, Some(clip_window), &clip.path)? == 0 {
         recorder.library.remove_clip(&clip.id);
         let _ = runtime
             .database
             .lock()
             .map(|database| database.delete_clip(&clip.id));
-        return Err(error.to_string());
+        return Ok(None);
     }
     if let Some(thumbnail_path) = &clip.thumbnail_path {
         let _ = generate_thumbnail(&ffmpeg, &clip.path, thumbnail_path);
@@ -730,7 +852,7 @@ fn handle_auto_event_inner(
 }
 
 #[tauri::command]
-fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+async fn start_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     start_capture_inner(runtime.inner())
 }
 
@@ -739,8 +861,17 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
     let mut capture = runtime.capture.lock().map_err(|error| error.to_string())?;
 
     if capture.is_some() {
-        return Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities));
+        return Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()));
     }
+
+    // A fresh capture session starts with an empty in-memory replay buffer, in
+    // case a previous session was interrupted before `stop_capture` drained it.
+    runtime
+        .ram_buffer
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clear();
+    let _ = fs::remove_dir_all(&runtime.ram_staging_dir);
 
     let storage = clipforge::storage::check_storage_space(&recorder.paths.buffer_root);
     if let clipforge::storage::StorageLevel::Critical = storage.level {
@@ -833,11 +964,11 @@ fn start_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         backend,
     });
 
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
-fn stop_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+async fn stop_capture(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     stop_capture_inner(runtime.inner())
 }
 
@@ -849,14 +980,14 @@ fn stop_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         active.backend.stop().map_err(|error| error.to_string())?;
         let ffmpeg = find_ffmpeg_executable()
             .ok_or_else(|| "FFmpeg was not found on PATH or in the bundled sidecar.".to_string())?;
-        let segments = collect_segments(&active.buffer_dir)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|segment| segment.path)
-            .collect::<Vec<_>>();
-        if !segments.is_empty() {
-            concat_segments(&ffmpeg, &segments, &active.session_output_path)
-                .map_err(|error| error.to_string())?;
+        let finalized = concat_union_segments(
+            runtime,
+            &active,
+            &ffmpeg,
+            None,
+            &active.session_output_path,
+        )?;
+        if finalized > 0 {
             let clip = add_session_clip(
                 &mut recorder,
                 active.session_output_path,
@@ -873,10 +1004,17 @@ fn stop_capture_inner(runtime: &AppRuntime) -> Result<DesktopStatus, String> {
         }
     }
 
+    runtime
+        .ram_buffer
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clear();
+    let _ = fs::remove_dir_all(&runtime.ram_staging_dir);
+
     if matches!(recorder.state.status, RecordingStatus::RecordingSession) {
         recorder.toggle_session_recording();
     }
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -900,6 +1038,7 @@ fn delete_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<Vec<Cl
 
     delete_clip_record(runtime.inner(), &clip_id)?;
     save_manifest(&recorder)?;
+    emit_event(runtime.inner(), "clip-deleted", clip_id);
     Ok(recorder.library.all().iter().map(clip_to_dto).collect())
 }
 
@@ -925,7 +1064,7 @@ fn reveal_clip(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<(), St
 }
 
 #[tauri::command]
-fn trim_clip(
+async fn trim_clip(
     clip_id: String,
     start_seconds: f64,
     end_seconds: f64,
@@ -1006,7 +1145,7 @@ fn trim_clip(
 }
 
 #[tauri::command]
-fn upload_clip(
+async fn upload_clip(
     clip_id: String,
     provider: Option<String>,
     custom_endpoint: Option<String>,
@@ -1151,11 +1290,12 @@ fn export_clip_copy(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<S
 }
 
 #[tauri::command]
-fn take_screenshot(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+async fn take_screenshot(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
     handle_screenshot()?;
+    emit_simple_event(&runtime, "screenshots-changed");
     let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -1407,7 +1547,7 @@ fn default_auto_clip_events_for_game(game_id: &str) -> Vec<&'static str> {
 }
 
 fn auto_clip_event_enabled(settings: &AppSettings, game_id: &str, event_type: &str) -> bool {
-    if !settings.auto_clip.enabled {
+    if !settings.auto_clip.enabled || settings.auto_clip.disabled_games.contains(game_id) {
         return false;
     }
     settings
@@ -1607,7 +1747,7 @@ fn set_hotkeys(
         register_hotkeys(&app_handle, runtime.inner())?;
     }
     
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 fn main() {
@@ -1615,6 +1755,8 @@ fn main() {
         create_runtime().expect("could not initialize ClipForge runtime");
 
     clipforge::crashlog::install_panic_hook(library_root.join("logs"));
+
+    let ram_staging_dir = library_root.join(".ram-staging");
 
     tauri::Builder::default()
         .manage(AppRuntime {
@@ -1626,6 +1768,12 @@ fn main() {
             valve_events: Mutex::new(Vec::new()),
             hotkey_shortcuts: Mutex::new(None),
             app_handle: Mutex::new(None),
+            metrics: Mutex::new(MetricCache {
+                free_disk_gb: None,
+                storage_limit_exceeded: None,
+            }),
+            ram_buffer: Mutex::new(RamReplayBuffer::default()),
+            ram_staging_dir,
             capture_capabilities: OnceLock::new(),
             quitting: AtomicBool::new(false),
         })
@@ -1712,7 +1860,13 @@ fn main() {
             set_minimize_to_tray_enabled,
             set_upload_settings,
             set_auto_clip_event_enabled,
+            set_game_auto_clip_enabled,
+            enable_all_auto_clips,
+            disable_all_auto_clips,
+            restore_default_auto_clips,
             set_capture_settings,
+            set_clip_directory,
+            set_auto_prune_enabled,
             finish_onboarding,
             write_gsi_configs,
             poll_auto_clip_events,
@@ -1752,7 +1906,7 @@ fn create_runtime() -> Result<(PathBuf, RecorderService, ClipDatabase), String> 
     let root = resolution.root;
     let settings = load_or_create_settings(&root)
         .map_err(|error| format!("Could not load settings: {error}"))?;
-    let paths = LibraryPaths::new(&root);
+    let paths = LibraryPaths::with_clip_root(&root, absolutize(&root, &settings.clip_root));
     paths.ensure().map_err(|error| error.to_string())?;
     let database = ClipDatabase::open(root.join("library.sqlite"))
         .map_err(|error| format!("Could not open clip database: {error}"))?;
@@ -1910,6 +2064,7 @@ fn start_backend_workers(app: tauri::AppHandle) {
         .name("clipforge-backend-workers".to_string())
         .spawn(move || loop {
             let runtime = app.state::<AppRuntime>();
+            ingest_ram_buffer(runtime.inner());
             let _ = refresh_detected_game_inner(runtime.inner());
             let _ = poll_auto_clip_events_inner(runtime.inner());
             let _ = stop_capture_on_critical_storage(runtime.inner());
@@ -1946,9 +2101,13 @@ fn stop_capture_on_critical_storage(runtime: &AppRuntime) -> Result<(), String> 
 }
 
 fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
-    let (buffer_root, limit_gb) = {
+    let (buffer_root, limit_gb, auto_prune) = {
         let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
-        (recorder.paths.buffer_root.clone(), recorder.settings.storage_limit_gb)
+        (
+            recorder.paths.buffer_root.clone(),
+            recorder.settings.storage_limit_gb,
+            recorder.settings.auto_prune_old_clips,
+        )
     };
     if limit_gb == 0 {
         return Ok(());
@@ -1964,15 +2123,198 @@ fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
             report.deleted_bytes / (1024 * 1024)
         );
     }
+    if auto_prune {
+        prune_saved_clips_over_limit(runtime, max_bytes)?;
+    }
     Ok(())
 }
 
+/// Deletes the oldest non-manual clips (and their thumbnails) until the saved
+/// library fits back under the storage limit. Only automatic/event/session
+/// clips are eligible so a manually saved highlight is never silently removed.
+fn prune_saved_clips_over_limit(runtime: &AppRuntime, max_bytes: u64) -> Result<(), String> {
+    let mut removed = 0usize;
+    loop {
+        let (thumbs_root, candidate) = {
+            let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+            if library_usage_bytes(&recorder) <= max_bytes {
+                break;
+            }
+            (
+                recorder.paths.thumbs_root.clone(),
+                recorder
+                    .library
+                    .all()
+                    .iter()
+                    .filter(|clip| !matches!(clip.source, ClipSource::ManualHotkey))
+                    .min_by_key(|clip| clip.created_at)
+                    .cloned(),
+            )
+        };
+        let Some(clip) = candidate else {
+            break;
+        };
+        let _ = fs::remove_file(&clip.path);
+        if let Some(thumbnail) = &clip.thumbnail_path {
+            let _ = remove_if_inside(&thumbs_root, thumbnail);
+        }
+        {
+            let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+            recorder.library.remove_clip(&clip.id);
+        }
+        let _ = delete_clip_record(runtime, &clip.id);
+        removed += 1;
+    }
+    if removed > 0 {
+        eprintln!(
+            "ClipForge storage cap: auto-pruned {removed} old clip(s) to stay under the storage limit."
+        );
+        emit_event(runtime, "storage-cleanup", removed);
+    }
+    Ok(())
+}
+
+fn emit_event(runtime: &AppRuntime, name: &str, payload: impl serde::Serialize + Clone) {
+    if let Ok(guard) = runtime.app_handle.lock() {
+        if let Some(handle) = guard.as_ref() {
+            let _ = handle.emit(name, payload);
+        }
+    }
+}
+
+fn emit_simple_event(state: &State<'_, AppRuntime>, name: &str) {
+    if let Ok(guard) = state.app_handle.lock() {
+        if let Some(handle) = guard.as_ref() {
+            let _ = handle.emit(name, ());
+        }
+    }
+}
+
+fn absolutize(root: &Path, value: &Path) -> PathBuf {
+    if value.is_absolute() {
+        value.to_path_buf()
+    } else {
+        root.join(value)
+    }
+}
+
+fn remove_if_inside(root: &Path, path: &Path) -> std::io::Result<()> {
+    if clipforge::storage::is_inside_root(root, path) && path.exists() {
+        fs::remove_file(path)
+    } else {
+        Ok(())
+    }
+}
+
+/// Merges the on-disk + in-RAM replay buffer and concatenates it into
+/// `output`. RAM-held segments are materialized into a per-call staging
+/// folder so FFmpeg sees real files; the folder is deleted afterwards.
+/// Returns the number of segments that were stitched together (0 when the
+/// buffer was empty, which leaves `output` untouched).
+fn concat_union_segments(
+    runtime: &AppRuntime,
+    active: &ActiveCapture,
+    ffmpeg: &Path,
+    window: Option<Duration>,
+    output: &Path,
+) -> Result<usize, String> {
+    let now = SystemTime::now();
+    let key = format!("clip-{}", unix_millis(now));
+    let staging = runtime.ram_staging_dir.join(&key);
+    let (paths, count) = {
+        let ram = runtime.ram_buffer.lock().map_err(|error| error.to_string())?;
+        let merged = merged_segments(
+            &ram,
+            &active.buffer_dir,
+            window,
+            active.segment_duration,
+            now,
+        )
+        .map_err(|error| error.to_string())?;
+        let paths = spool_merged(&staging, &key, &merged).map_err(|error| error.to_string())?;
+        (paths, merged.len())
+    };
+    if count == 0 || paths.is_empty() {
+        let _ = fs::remove_dir_all(&staging);
+        return Ok(0);
+    }
+    concat_segments(ffmpeg, &paths, output).map_err(|error| error.to_string())?;
+    let _ = fs::remove_dir_all(&staging);
+    Ok(count)
+}
+
+/// Moves completed replay segments from disk into the in-memory ring buffer,
+/// then prunes the buffer to stay within the configured replay window and a
+/// hard byte ceiling. The newest `.mp4` in the active session directory is
+/// always skipped because the encoder may still be writing it.
+fn ingest_ram_buffer(runtime: &AppRuntime) {
+    let (buffer_dir, replay_window, segment_duration) = {
+        let recorder = match runtime.recorder.lock() {
+            Ok(recorder) => recorder,
+            Err(_) => return,
+        };
+        let capture = match runtime.capture.lock() {
+            Ok(capture) => capture,
+            Err(_) => return,
+        };
+        let Some(active) = capture.as_ref() else {
+            drop(capture);
+            drop(recorder);
+            runtime
+                .ram_buffer
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clear();
+            return;
+        };
+        (
+            active.buffer_dir.clone(),
+            recorder.settings.replay_buffer,
+            active.segment_duration,
+        )
+    };
+
+    let disk_segments = match collect_disk_segments(&buffer_dir) {
+        Ok(disk_segments) => disk_segments,
+        Err(_) => return,
+    };
+    if disk_segments.is_empty() {
+        return;
+    }
+
+    let mut ram = runtime
+        .ram_buffer
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    // Skip the newest file — it is either the live segment still being written
+    // or, if not yet finalized, a segment that will complete before the next
+    // ingest cycle and will then be ingested safely.
+    let ingestible = disk_segments.len().saturating_sub(1);
+    for segment in &disk_segments[..ingestible] {
+        if ram.contains(&segment.file_name) {
+            continue;
+        }
+        let data = match fs::read(&segment.path) {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+        ram.insert(segment.file_name.clone(), segment.modified_at, data);
+        let _ = fs::remove_file(&segment.path);
+    }
+    let now = SystemTime::now();
+    ram.prune_to_window(replay_window, segment_duration, now);
+    ram.cap_bytes(DEFAULT_RAM_CAP_BYTES);
+}
+
 fn status_from_recorder(
+    runtime: &AppRuntime,
     recorder: &RecorderService,
     capture: Option<&ActiveCapture>,
-    capabilities: &OnceLock<CaptureCapabilities>,
 ) -> DesktopStatus {
-    let capabilities = capabilities.get().unwrap_or(&DEFAULT_CAPS);
+    let capabilities = runtime
+        .capture_capabilities
+        .get()
+        .unwrap_or(&DEFAULT_CAPS);
     let game_id = recorder.state.detected_game_id.clone().unwrap_or_default();
     let quality = recorder.settings.effective_quality_for(&game_id).clone();
     DesktopStatus {
@@ -2010,15 +2352,19 @@ fn status_from_recorder(
         system_audio_available: capabilities.system_audio_available,
         desktop_duplication_available: capabilities.desktop_duplication_available,
         auto_clip_enabled_events: auto_clip_event_dtos(&recorder.settings),
+        auto_clip_disabled_games: recorder.settings.auto_clip.disabled_games.iter().cloned().collect(),
         hotkey_clip_last_60s: recorder.settings.hotkeys.clip_last_60s.clone(),
         hotkey_clip_last_30s: recorder.settings.hotkeys.clip_last_30s.clone(),
         hotkey_toggle_session_recording: recorder.settings.hotkeys.toggle_session_recording.clone(),
         hotkey_screenshot: recorder.settings.hotkeys.screenshot.clone(),
-        free_disk_gb: clipforge::storage::check_storage_space(&recorder.paths.buffer_root).free_gb(),
+        free_disk_gb: cached_free_disk(runtime, &recorder.paths),
         capture_fps: quality.fps,
         capture_bitrate_kbps: quality.bitrate_kbps,
         capture_resolution: format!("{}x{}", quality.width, quality.height),
         storage_limit_gb: recorder.settings.storage_limit_gb,
+        clip_directory: recorder.paths.clip_root.display().to_string(),
+        storage_limit_exceeded: cached_limit_exceeded(runtime, recorder),
+        auto_prune_old_clips: recorder.settings.auto_prune_old_clips,
         excluded_window_titles: recorder.settings.privacy.excluded_window_titles.clone(),
         separate_audio_tracks: recorder.settings.privacy.separate_audio_tracks,
         game_quality_overrides: quality_override_dtos(&recorder.settings),
@@ -2027,6 +2373,66 @@ fn status_from_recorder(
         onboarding_complete: recorder.settings.onboarding_complete,
         minimize_to_tray: recorder.settings.minimize_to_tray_enabled,
     }
+}
+
+fn cached_free_disk(runtime: &AppRuntime, paths: &LibraryPaths) -> f64 {
+    let mut metrics = runtime.metrics.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((at, value)) = metrics.free_disk_gb {
+        if at.elapsed() < METRIC_CACHE_TTL {
+            return value;
+        }
+    }
+    let value = clipforge::storage::check_storage_space(&paths.buffer_root).free_gb();
+    metrics.free_disk_gb = Some((std::time::Instant::now(), value));
+    value
+}
+
+fn cached_limit_exceeded(runtime: &AppRuntime, recorder: &RecorderService) -> bool {
+    let limit = recorder.settings.storage_limit_gb;
+    if limit == 0 {
+        return false;
+    }
+    let mut metrics = runtime.metrics.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some((at, value)) = metrics.storage_limit_exceeded {
+        if at.elapsed() < METRIC_CACHE_TTL {
+            return value;
+        }
+    }
+    let value = library_usage_bytes(recorder) > limit.saturating_mul(1024 * 1024 * 1024);
+    metrics.storage_limit_exceeded = Some((std::time::Instant::now(), value));
+    value
+}
+
+fn library_usage_bytes(recorder: &RecorderService) -> u64 {
+    let mut total = 0u64;
+    for dir in [&recorder.paths.clip_root, &recorder.paths.thumbs_root] {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    total = total.saturating_add(dir_bytes(&entry_path));
+                } else if let Ok(meta) = entry.metadata() {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    total
+}
+
+fn dir_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                total = total.saturating_add(dir_bytes(&entry_path));
+            } else if let Ok(meta) = entry.metadata() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
 }
 
 fn quality_override_dtos(settings: &AppSettings) -> Vec<GameQualityOverrideDto> {
@@ -2077,7 +2483,7 @@ fn set_game_quality_override(
         .insert(game_id, preset);
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save quality override: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 #[tauri::command]
@@ -2090,7 +2496,7 @@ fn clear_game_quality_override(
     recorder.settings.quality_overrides_by_game.remove(&game_id);
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save quality override: {error}"))?;
-    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+    Ok(status_from_recorder(&runtime, &recorder, capture.as_ref()))
 }
 
 fn clip_to_dto(clip: &Clip) -> ClipDto {
