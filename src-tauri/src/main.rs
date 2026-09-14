@@ -39,9 +39,12 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, State};
 
 struct AppRuntime {
@@ -54,6 +57,7 @@ struct AppRuntime {
     hotkey_shortcuts: Mutex<Option<HotkeyShortcuts>>,
     app_handle: Mutex<Option<tauri::AppHandle>>,
     capture_capabilities: OnceLock<CaptureCapabilities>,
+    quitting: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -167,6 +171,7 @@ struct DesktopStatus {
     effective_quality_applied: bool,
     app_version: String,
     onboarding_complete: bool,
+    minimize_to_tray: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,6 +379,19 @@ fn set_auto_record_enabled(
     let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
     let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
     recorder.settings.privacy.desktop_capture_requires_confirmation = !enabled;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
+}
+
+#[tauri::command]
+fn set_minimize_to_tray_enabled(
+    enabled: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.minimize_to_tray_enabled = enabled;
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save settings: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref(), &runtime.capture_capabilities))
@@ -1609,8 +1627,24 @@ fn main() {
             hotkey_shortcuts: Mutex::new(None),
             app_handle: Mutex::new(None),
             capture_capabilities: OnceLock::new(),
+            quitting: AtomicBool::new(false),
         })
-.setup(|app| {
+.on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let runtime = app.state::<AppRuntime>();
+                let minimize_to_tray = runtime
+                    .recorder
+                    .lock()
+                    .map(|recorder| recorder.settings.minimize_to_tray_enabled)
+                    .unwrap_or(false);
+                if minimize_to_tray && !runtime.quitting.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .setup(|app| {
             let handle = app.handle().clone();
             
             // Store app handle for hotkey re-registration
@@ -1624,6 +1658,33 @@ fn main() {
                 let _ = runtime.app_handle.lock().map(|mut guard| {
                     *guard = Some(handle.clone());
                 });
+            }
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                let show_item = MenuItem::with_id(app, "show", "Open ClipForge", true, None::<&str>)?;
+                let quit_item = MenuItem::with_id(app, "quit", "Quit ClipForge", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+                TrayIconBuilder::new()
+                    .icon(icon)
+                    .tooltip("ClipForge")
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            let runtime = app.state::<AppRuntime>();
+                            runtime.quitting.store(true, Ordering::SeqCst);
+                            app.exit(0);
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
             }
             
             start_valve_gsi_receiver(handle.clone());
@@ -1648,6 +1709,7 @@ fn main() {
             list_audio_devices,
             set_mic_device,
             set_auto_record_enabled,
+            set_minimize_to_tray_enabled,
             set_upload_settings,
             set_auto_clip_event_enabled,
             set_capture_settings,
@@ -1963,6 +2025,7 @@ fn status_from_recorder(
         effective_quality_applied: game_override_is_active(&recorder.settings, &game_id),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         onboarding_complete: recorder.settings.onboarding_complete,
+        minimize_to_tray: recorder.settings.minimize_to_tray_enabled,
     }
 }
 

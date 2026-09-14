@@ -327,6 +327,11 @@ h3 {
   object-fit: cover;
 }
 
+.screenshot-thumb img {
+  object-fit: contain;
+  background: #000;
+}
+
 .thumb.kill {
   background: linear-gradient(135deg, #1f2937, #7f1d1d);
 }

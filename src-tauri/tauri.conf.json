@@ -21,7 +21,15 @@
     ],
     "withGlobalTauri": true,
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$DOCUMENT/ClipForge/**",
+          "$PICTURE/ClipForge/**",
+          "$HOME/.clipforge/**"
+        ]
+      }
     }
   },
   "bundle": {

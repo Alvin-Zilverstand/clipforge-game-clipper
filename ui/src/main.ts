@@ -85,6 +85,7 @@ type DesktopStatus = {
   effective_quality_applied: boolean;
   app_version: string;
   onboarding_complete: boolean;
+  minimize_to_tray: boolean;
 };
 
 type ClipDto = {
@@ -190,6 +191,7 @@ type AppState = {
   separateAudioTracks: boolean;
   appVersion: string;
   onboardingComplete: boolean;
+  minimizeToTray: boolean;
   onboardingStep: number;
   gameQualityOverrides: GameQualityOverrideDto[];
   effectiveQualityApplied: boolean;
@@ -279,6 +281,7 @@ const state: AppState = {
   separateAudioTracks: false,
   appVersion: "0.1.0",
   onboardingComplete: true,
+  minimizeToTray: false,
   onboardingStep: 0,
   gameQualityOverrides: [],
   effectiveQualityApplied: false,
@@ -869,6 +872,12 @@ function renderSettingsView() {
         <p class="muted">Old temporary buffer segments are removed automatically once the buffer reaches the cap; saved clips are kept.</p>
       </article>
       <article class="settings-panel">
+        <p class="eyebrow">Tray</p>
+        <h2>Close behavior</h2>
+        <label class="toggle"><input type="checkbox" ${state.minimizeToTray ? "checked" : ""} data-action="toggle-minimize-to-tray" /> Keep running in the system tray when I close the window</label>
+        <p class="muted">When enabled, closing the ClipForge window hides it to the tray and it keeps recording. Use "Quit ClipForge" from the tray icon to exit fully.</p>
+      </article>
+      <article class="settings-panel">
         <p class="eyebrow">About & support</p>
         <h2>ClipForge ${escapeHtml(state.appVersion)}</h2>
         <p class="muted">${escapeHtml(state.update.message)}</p>
@@ -1002,6 +1011,12 @@ function bindEvents() {
     state.autoRecordEnabled = (event.target as HTMLInputElement).checked;
     render();
     void saveAutoRecordSetting(state.autoRecordEnabled);
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='toggle-minimize-to-tray']")?.addEventListener("change", (event) => {
+    state.minimizeToTray = (event.target as HTMLInputElement).checked;
+    render();
+    void saveMinimizeToTraySetting(state.minimizeToTray);
   });
 
   appRoot.querySelectorAll<HTMLButtonElement>("[data-upload-provider]").forEach((button) => {
@@ -1426,6 +1441,9 @@ state.separateAudioTracks = status.separate_audio_tracks ?? false;
   if (typeof status.onboarding_complete === "boolean") {
     state.onboardingComplete = status.onboarding_complete;
   }
+  if (typeof status.minimize_to_tray === "boolean") {
+    state.minimizeToTray = status.minimize_to_tray;
+  }
 }
 
 async function trimSelectedClip() {
@@ -1669,6 +1687,20 @@ async function saveAutoRecordSetting(enabled: boolean) {
     render();
   } catch (error) {
     console.warn("Could not save auto-record setting", error);
+  }
+}
+
+async function saveMinimizeToTraySetting(enabled: boolean) {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_minimize_to_tray_enabled", { enabled });
+    applyDesktopStatus(status);
+    render();
+  } catch (error) {
+    console.warn("Could not save minimize-to-tray setting", error);
   }
 }
 

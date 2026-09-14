@@ -54,6 +54,9 @@
 - The default clip library root is `~/Documents/ClipForge` (rather than the process working directory), and a first-run migration moves any legacy `clipforge-library` folder found in the CWD into the new location while rewriting stored clip paths in the SQLite database.
 - Capture capabilities (bundled FFmpeg discovery, WASAPI/ddagrab support) are detected once at startup and cached, so background workers (`refresh_detected_game` every 2s, UI status poll every 3s) never spawn FFmpeg; all FFmpeg/console subprocesses are launched with a hidden console window on Windows, preventing the app from freezing and flashing a terminal repeatedly.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
+- Tauri's asset protocol is enabled and scoped to `$DOCUMENT/ClipForge/**` and `$PICTURE/ClipForge/**`, so `convertFileSrc` URLs load for clip thumbnails, video previews, and screenshot images (previously returned blocked asset responses).
+- Screenshot thumbnails use `object-fit: contain` so the full screenshot is shown without cropping.
+- An opt-in "Minimize to tray" setting keeps ClipForge running in the system tray when the main window is closed; closing the window hides it, and the tray menu offers "Open ClipForge" to restore it or "Quit ClipForge" to exit fully. The toggle is under Settings > Tray and defaults to off.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
 

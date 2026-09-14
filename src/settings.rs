@@ -93,6 +93,8 @@ pub struct AppSettings {
     pub quality_overrides_by_game: BTreeMap<String, QualityPreset>,
     #[serde(default)]
     pub onboarding_complete: bool,
+    #[serde(default)]
+    pub minimize_to_tray_enabled: bool,
 }
 
 impl AppSettings {
@@ -140,6 +142,7 @@ impl AppSettings {
             upload: UploadSettings::default(),
             quality_overrides_by_game: BTreeMap::new(),
             onboarding_complete: false,
+            minimize_to_tray_enabled: false,
         }
     }
 
