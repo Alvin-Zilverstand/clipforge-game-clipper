@@ -39,6 +39,7 @@
 - The Uploads screen shows recent upload history with retry buttons for failed uploads, refreshed from the backend on load and after uploads.
 - Screenshot capture is implemented: F9 takes a PNG screenshot via bundled FFmpeg into `~/Pictures/ClipForge`, the recording bar has a Screenshot button, and the Library shows recent screenshots with an Open-in-Explorer action.
 - Storage guardrails are wired: recording refuses to start below 2 GB free and a backend worker stops an active recording and flags `StorageLow` when available disk drops to critical; the recording bar shows free disk space and a low-disk warning.
+- Panic reporting writes crash reports with stack traces to the logs folder (`library/logs`), prunes old entries, and the Settings screen can open the logs folder.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
@@ -53,7 +54,7 @@
 - Hotkeys are still hardcoded; editable hotkey registration is future work.
 - Capture source, quality, storage cap, excluded windows, and per-game override UI are still incomplete.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
-- Installer onboarding, auto-update, and crash logging are still not implemented.
+- Installer onboarding and auto-update are still not implemented.
 
 ## Next Engineering Steps
 

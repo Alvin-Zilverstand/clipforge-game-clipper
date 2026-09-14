@@ -1033,6 +1033,42 @@ fn list_screenshots() -> Result<Vec<String>, String> {
         .collect())
 }
 
+#[tauri::command]
+fn reveal_crash_logs(runtime: State<'_, AppRuntime>) -> Result<(), String> {
+    let logs_dir = runtime.library_root.join("logs");
+    fs::create_dir_all(&logs_dir).map_err(|error| error.to_string())?;
+    Command::new("explorer")
+        .arg(logs_dir.display().to_string())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_crash_logs(runtime: State<'_, AppRuntime>) -> Result<Vec<String>, String> {
+    let logs_dir = runtime.library_root.join("logs");
+    let Ok(entries) = fs::read_dir(&logs_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut files = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with("crash-"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    Ok(files
+        .iter()
+        .rev()
+        .take(10)
+        .filter_map(|path| path.to_str().map(|s| s.to_string()))
+        .collect())
+}
+
 fn upload_clip_with_settings(
     clip: &Clip,
     settings: &AppSettings,
@@ -1371,6 +1407,8 @@ fn main() {
     let (library_root, recorder, database) =
         create_runtime().expect("could not initialize ClipForge runtime");
 
+    clipforge::crashlog::install_panic_hook(library_root.join("logs"));
+
     tauri::Builder::default()
         .manage(AppRuntime {
             library_root,
@@ -1432,6 +1470,8 @@ fn main() {
             take_screenshot,
             list_screenshots,
             reveal_screenshot,
+            reveal_crash_logs,
+            list_crash_logs,
             set_hotkeys
         ])
         .run(tauri::generate_context!())

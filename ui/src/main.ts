@@ -641,6 +641,12 @@ function renderSettingsView() {
         <p class="muted">Old temporary buffer segments are removed automatically; saved clips are kept.</p>
       </article>
       <article class="settings-panel">
+        <p class="eyebrow">Support</p>
+        <h2>Crash logs</h2>
+        <p class="muted">Panic details are written to the logs folder so issues can be investigated.</p>
+        <button data-action="reveal-crash-logs">Reveal Crash Logs</button>
+      </article>
+      <article class="settings-panel">
         <p class="eyebrow">Hotkeys</p>
         <h2>Customizable</h2>
         <label>Clip last 60s <input value="${escapeHtml(state.hotkeyClipLast60s)}" data-action="hotkey-clip-60s" placeholder="e.g. F8" /></label>
@@ -828,6 +834,10 @@ function bindEvents() {
   });
   appRoot.querySelector<HTMLButtonElement>("[data-action='save-hotkeys']")?.addEventListener("click", () => {
     void saveHotkeys();
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='reveal-crash-logs']")?.addEventListener("click", () => {
+    void revealCrashLogs();
   });
 
   appRoot.querySelectorAll<HTMLButtonElement>("[data-action='reveal-screenshot']").forEach((button) => {
@@ -1189,6 +1199,15 @@ async function revealScreenshot(path: string) {
   } catch (error) {
     console.error("Could not reveal screenshot", error);
     showNotice(`Could not reveal screenshot: ${String(error)}`);
+  }
+}
+
+async function revealCrashLogs() {
+  try {
+    await window.__TAURI__?.core?.invoke?.("reveal_crash_logs");
+  } catch (error) {
+    console.error("Could not reveal crash logs", error);
+    showNotice(`Could not reveal crash logs: ${String(error)}`);
   }
 }
 

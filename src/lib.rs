@@ -1,6 +1,7 @@
 pub mod screenshot;
 pub mod audio;
 pub mod capture;
+pub mod crashlog;
 pub mod database;
 pub mod game_detection;
 pub mod game_watcher;
