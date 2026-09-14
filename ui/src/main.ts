@@ -8,7 +8,7 @@ type RecordingState =
   | "Processing"
   | "StorageLow";
 
-type ClipSource = "Auto Event" | "Manual Hotkey" | "Bookmark" | "Imported";
+type ClipSource = "Auto Event" | "Manual Hotkey" | "Bookmark" | "Imported" | "Screenshot";
 type UploadState = "Local only" | "Uploaded" | "Failed" | "Queued";
 type UploadProvider = "catbox" | "litterbox" | "custom_http" | "lustful";
 
@@ -133,6 +133,7 @@ type AppState = {
   notice: string;
   selectedClipId: string;
   clips: Clip[];
+  screenshots: string[];
   autoEvents: AutoEvent[];
   hotkeyClipLast60s: string;
   hotkeyClipLast30s: string;
@@ -156,38 +157,39 @@ declare global {
 let tauriInvoke: (<T>(command: string, args?: Record<string, unknown>) => Promise<T>) | null = null;
 
 const state: AppState = {
-  activeView: "Library",
-  recordingState: "WaitingForGame",
-  detectedGame: "Waiting for game",
-  replayBufferSeconds: 60,
-  systemAudioEnabled: true,
-  sessionRecording: false,
-  captureActive: false,
-  captureBackend: null,
-  capturePath: null,
-  ffmpegAvailable: false,
-  ffmpegPath: null,
-  systemAudioAvailable: false,
-  desktopDuplicationAvailable: false,
-  micEnabled: false,
-  micDevice: "",
-  audioDevices: [],
-  autoRecordEnabled: false,
-  autoUpload: false,
-  uploadProvider: "catbox",
-  catboxUserhash: "",
-  litterboxExpiryHours: 24,
-  customUploadEndpoint: "",
-  customUploadResponsePath: "url",
-  customUploadHeaders: "",
-  gsiConfigStatus: "",
-  libraryFilter: "all",
-  libraryQuery: "",
-  libraryViewMode: "grid",
-  notice: "",
-  selectedClipId: "",
-  clips: [],
-  autoEvents: [
+   activeView: "Library",
+   recordingState: "WaitingForGame",
+   detectedGame: "Waiting for game",
+   replayBufferSeconds: 60,
+   systemAudioEnabled: true,
+   sessionRecording: false,
+   captureActive: false,
+   captureBackend: null,
+   capturePath: null,
+   ffmpegAvailable: false,
+   ffmpegPath: null,
+   systemAudioAvailable: false,
+   desktopDuplicationAvailable: false,
+   micEnabled: false,
+   micDevice: "",
+   audioDevices: [],
+   autoRecordEnabled: false,
+   autoUpload: false,
+   uploadProvider: "catbox",
+   catboxUserhash: "",
+   litterboxExpiryHours: 24,
+   customUploadEndpoint: "",
+   customUploadResponsePath: "url",
+   customUploadHeaders: "",
+   gsiConfigStatus: "",
+   libraryFilter: "all",
+   libraryQuery: "",
+   libraryViewMode: "grid",
+   notice: "",
+   selectedClipId: "",
+   clips: [],
+   screenshots: [],
+   autoEvents: [
     { id: "cs2-kill", gameId: "counter-strike-2", eventType: "kill", game: "Counter-Strike 2", event: "Kill", enabled: true },
     { id: "cs2-death", gameId: "counter-strike-2", eventType: "death", game: "Counter-Strike 2", event: "Death", enabled: true },
     { id: "cs2-round", gameId: "counter-strike-2", eventType: "round_win", game: "Counter-Strike 2", event: "Round win", enabled: true },
@@ -269,6 +271,7 @@ function renderRecordingBar() {
       </div>
       <div class="status-pill">${statusText}</div>
       <button class="icon-button" data-action="clip">Clip</button>
+      <button class="icon-button" data-action="screenshot">Screenshot</button>
       <button class="record-button" data-action="toggle-record">${state.captureActive || state.sessionRecording ? "Stop" : "Record"}</button>
     </header>
   `;
@@ -291,41 +294,76 @@ function renderActiveView(selectedClip: Clip | undefined) {
 }
 
 function renderLibraryView(selectedClip: Clip | undefined) {
-  const clips = filteredClips();
+   const clips = filteredClips();
+   return `
+     <section class="content-grid">
+       <section class="library-panel">
+         <div class="section-heading">
+           <div>
+             <p class="eyebrow">Local library</p>
+             <h2>Recent Clips</h2>
+           </div>
+           <div class="segmented">
+             <button class="${state.libraryViewMode === "grid" ? "selected" : ""}" data-view-mode="grid">Grid</button>
+             <button class="${state.libraryViewMode === "list" ? "selected" : ""}" data-view-mode="list">List</button>
+           </div>
+         </div>
+         <input class="search-input" placeholder="Search clips, games, events, tags" value="${escapeHtml(state.libraryQuery)}" data-action="library-search" />
+         <div class="filters">
+           ${[
+             ["all", "All"],
+             ["kills", "Kills"],
+             ["wins", "Wins"],
+             ["uploaded", "Uploaded"],
+             ["failed", "Failed"],
+           ]
+           .map(
+             ([filter, label]) =>
+               `<button class="${state.libraryFilter === filter ? "selected" : ""}" data-library-filter="${filter}">${label}</button>`,
+           )
+           .join("")}
+         </div>
+         <div class="${state.libraryViewMode === "list" ? "clip-list" : "clip-grid"}">
+           ${clips.length > 0 ? clips.map(renderClipCard).join("") : `<div class="empty-state">No matching clips</div>`}
+         </div>
+       </section>
+       
+       <section class="screenshots-panel">
+         <div class="section-heading">
+           <div>
+             <p class="eyebrow">Screenshots</p>
+             <h2>Recent Screenshots</h2>
+           </div>
+           <div class="segmented">
+             <button class="${state.libraryViewMode === "grid" ? "selected" : ""}" data-view-mode="grid">Grid</button>
+             <button class="${state.libraryViewMode === "list" ? "selected" : ""}" data-view-mode="list">List</button>
+           </div>
+         </div>
+         <input class="search-input" placeholder="Search screenshots" value="${escapeHtml(state.libraryQuery)}" data-action="library-search" />
+         <div class="${state.libraryViewMode === "list" ? "screenshot-list" : "screenshot-grid"}">
+           ${state.screenshots.length > 0 ? state.screenshots.map(renderScreenshotCard).join("") : `<div class="empty-state">No screenshots</div>`}
+         </div>
+       </section>
+       
+       ${renderClipDetails(selectedClip)}
+     </section>
+   `;
+ }
+
+function renderScreenshotCard(path: string) {
+  const filename = path.split(/[/\\]/).pop() ?? path;
+  const url = convertFileSrc(path);
   return `
-    <section class="content-grid">
-      <section class="library-panel">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Local library</p>
-            <h2>Recent Clips</h2>
-          </div>
-          <div class="segmented">
-            <button class="${state.libraryViewMode === "grid" ? "selected" : ""}" data-view-mode="grid">Grid</button>
-            <button class="${state.libraryViewMode === "list" ? "selected" : ""}" data-view-mode="list">List</button>
-          </div>
-        </div>
-        <input class="search-input" placeholder="Search clips, games, events, tags" value="${escapeHtml(state.libraryQuery)}" data-action="library-search" />
-        <div class="filters">
-          ${[
-            ["all", "All"],
-            ["kills", "Kills"],
-            ["wins", "Wins"],
-            ["uploaded", "Uploaded"],
-            ["failed", "Failed"],
-          ]
-            .map(
-              ([filter, label]) =>
-                `<button class="${state.libraryFilter === filter ? "selected" : ""}" data-library-filter="${filter}">${label}</button>`,
-            )
-            .join("")}
-        </div>
-        <div class="${state.libraryViewMode === "list" ? "clip-list" : "clip-grid"}">
-          ${clips.length > 0 ? clips.map(renderClipCard).join("") : `<div class="empty-state">No matching clips</div>`}
-        </div>
-      </section>
-      ${renderClipDetails(selectedClip)}
-    </section>
+    <article class="clip-card screenshot-card" data-screenshot-path="${escapeHtml(path)}">
+      <div class="thumb screenshot-thumb">
+        <img src="${url}" alt="${escapeHtml(filename)}" />
+      </div>
+      <h3>${escapeHtml(filename)}</h3>
+      <p class="muted">${escapeHtml(path)}</p>
+      <div class="actions">
+        <button data-action="reveal-screenshot" data-screenshot-path="${escapeHtml(path)}">Open</button>
+      </div>
+    </article>
   `;
 }
 
@@ -605,6 +643,10 @@ function bindEvents() {
     void saveClip();
   });
 
+  appRoot.querySelector<HTMLButtonElement>("[data-action='screenshot']")?.addEventListener("click", () => {
+    void takeScreenshot();
+  });
+
   appRoot.querySelector<HTMLButtonElement>("[data-action='toggle-record']")?.addEventListener("click", () => {
     void toggleRecording();
   });
@@ -739,6 +781,15 @@ function bindEvents() {
     void saveHotkeys();
   });
 
+  appRoot.querySelectorAll<HTMLButtonElement>("[data-action='reveal-screenshot']").forEach((button) => {
+    button.addEventListener("click", () => {
+      const path = button.dataset.screenshotPath;
+      if (path) {
+        void revealScreenshot(path);
+      }
+    });
+  });
+
   // Timeline drag handlers
   const timelineTrack = appRoot.querySelector<HTMLElement>("[data-action='timeline-track']");
   const handleStart = appRoot.querySelector<HTMLElement>("#timeline-handle-start");
@@ -773,7 +824,7 @@ function bindEvents() {
       }
     };
 
-    const startDrag = (handle: "start" | "end", clientX: number) => {
+    const startDrag = (handle: "start" | "end") => {
       draggingHandle = handle;
       document.body.style.cursor = "ew-resize";
       document.body.style.userSelect = "none";
@@ -810,12 +861,12 @@ function bindEvents() {
 
     handleStart.addEventListener("mousedown", (e) => {
       e.stopPropagation();
-      startDrag("start", e.clientX);
+      startDrag("start");
     });
     
     handleEnd.addEventListener("mousedown", (e) => {
       e.stopPropagation();
-      startDrag("end", e.clientX);
+      startDrag("end");
     });
 
     timelineTrack.addEventListener("mousedown", (e) => {
@@ -1063,6 +1114,15 @@ async function revealSelectedClip() {
   } catch (error) {
     console.error("Could not reveal clip", error);
     showNotice(`Could not reveal clip: ${String(error)}`);
+  }
+}
+
+async function revealScreenshot(path: string) {
+  try {
+    await window.__TAURI__?.core?.invoke?.("reveal_screenshot", { path });
+  } catch (error) {
+    console.error("Could not reveal screenshot", error);
+    showNotice(`Could not reveal screenshot: ${String(error)}`);
   }
 }
 
@@ -1333,6 +1393,44 @@ async function saveHotkeys() {
   }
 }
 
+async function takeScreenshot() {
+   if (!tauriInvoke) {
+       return;
+   }
+
+   state.recordingState = "Processing";
+   render();
+
+   try {
+       await tauriInvoke("take_screenshot");
+       await refreshScreenshots();
+       showNotice("Screenshot saved");
+       render();
+   } catch (error) {
+       console.error("Could not take screenshot", error);
+       showNotice(`Could not take screenshot: ${String(error)}`);
+       render();
+   }
+}
+
+async function listScreenshots() {
+   if (!tauriInvoke) {
+       return [];
+   }
+
+   try {
+       return await tauriInvoke<string[]>("list_screenshots");
+   } catch (error) {
+       console.warn("Could not list screenshots", error);
+       return [];
+   }
+}
+
+async function refreshScreenshots() {
+   const screenshots = await listScreenshots();
+   state.screenshots = screenshots;
+}
+
 function filteredClips() {
   const query = state.libraryQuery.trim().toLowerCase();
   return state.clips.filter((clip) => {
@@ -1418,6 +1516,7 @@ async function loadDesktopBridge() {
     const clips = await invoke<ClipDto[]>("list_clips");
     state.clips = clips.map(clipFromDto);
     state.selectedClipId = state.clips[0]?.id ?? "";
+    await refreshScreenshots();
     render();
     await refreshAudioDevices();
     window.setInterval(() => {

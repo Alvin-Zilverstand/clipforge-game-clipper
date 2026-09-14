@@ -1,3 +1,4 @@
+pub mod screenshot;
 pub mod audio;
 pub mod capture;
 pub mod database;

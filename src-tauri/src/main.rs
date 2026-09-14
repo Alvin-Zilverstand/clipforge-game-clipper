@@ -58,6 +58,7 @@ struct HotkeyShortcuts {
     clip_60: tauri_plugin_global_shortcut::Shortcut,
     clip_30: tauri_plugin_global_shortcut::Shortcut,
     toggle_recording: tauri_plugin_global_shortcut::Shortcut,
+    screenshot: tauri_plugin_global_shortcut::Shortcut,
 }
 
 struct ActiveCapture {
@@ -960,6 +961,35 @@ fn export_clip_copy(clip_id: String, runtime: State<'_, AppRuntime>) -> Result<S
     Ok(output.display().to_string())
 }
 
+#[tauri::command]
+fn take_screenshot(runtime: State<'_, AppRuntime>) -> Result<DesktopStatus, String> {
+    handle_screenshot()?;
+    let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn reveal_screenshot(path: String) -> Result<(), String> {
+    let path = PathBuf::from(&path);
+    if !path.exists() {
+        return Err(format!("Screenshot file does not exist: {}", path.display()));
+    }
+    Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_screenshots() -> Result<Vec<String>, String> {
+    Ok(clipforge::screenshot::list_screenshots()
+        .into_iter()
+        .filter_map(|path| path.to_str().map(|s| s.to_string()))
+        .collect())
+}
+
 fn upload_clip_with_settings(
     clip: &Clip,
     settings: &AppSettings,
@@ -1185,6 +1215,7 @@ fn register_hotkeys(
             let _ = app.global_shortcut().unregister(existing.clip_60);
             let _ = app.global_shortcut().unregister(existing.clip_30);
             let _ = app.global_shortcut().unregister(existing.toggle_recording);
+            let _ = app.global_shortcut().unregister(existing.screenshot);
         }
     }
     
@@ -1197,9 +1228,14 @@ fn register_hotkeys(
     let clip_30 = Shortcut::new(clip_30_mods, clip_30_code);
     let toggle_recording = Shortcut::new(toggle_mods, toggle_code);
     
+    let (screenshot_mods, screenshot_code) = parse_accelerator(&settings.screenshot)?;
+    
+    let screenshot = Shortcut::new(screenshot_mods, screenshot_code);
+    
     let handler_clip_60 = clip_60.clone();
     let handler_clip_30 = clip_30.clone();
     let handler_toggle_recording = toggle_recording.clone();
+    let handler_screenshot = screenshot.clone();
     
     app.plugin(
         tauri_plugin_global_shortcut::Builder::new()
@@ -1223,6 +1259,8 @@ fn register_hotkeys(
                     } else {
                         let _ = start_capture_inner(runtime.inner());
                     }
+                } else if shortcut == &handler_screenshot {
+                    let _ = handle_screenshot();
                 }
             })
             .build(),
@@ -1231,12 +1269,14 @@ fn register_hotkeys(
     app.global_shortcut().register(clip_60.clone()).map_err(|e| e.to_string())?;
     app.global_shortcut().register(clip_30.clone()).map_err(|e| e.to_string())?;
     app.global_shortcut().register(toggle_recording.clone()).map_err(|e| e.to_string())?;
+    app.global_shortcut().register(screenshot.clone()).map_err(|e| e.to_string())?;
     
     if let Ok(mut shortcuts_guard) = runtime.hotkey_shortcuts.lock() {
         *shortcuts_guard = Some(HotkeyShortcuts {
             clip_60,
             clip_30,
             toggle_recording,
+            screenshot,
         });
     }
     
@@ -1330,25 +1370,33 @@ fn main() {
             set_mic_enabled,
             set_system_audio_enabled,
             list_audio_devices,
-        set_mic_device,
-        set_auto_record_enabled,
-        set_upload_settings,
-        set_auto_clip_event_enabled,
-        write_gsi_configs,
-        poll_auto_clip_events,
-        save_manual_clip,
-        start_capture,
-        stop_capture,
-        delete_clip,
-        reveal_clip,
-        trim_clip,
-        upload_clip,
-        update_clip_metadata,
-        export_clip_copy,
-        set_hotkeys
+            set_mic_device,
+            set_auto_record_enabled,
+            set_upload_settings,
+            set_auto_clip_event_enabled,
+            write_gsi_configs,
+            poll_auto_clip_events,
+            save_manual_clip,
+            start_capture,
+            stop_capture,
+            delete_clip,
+            reveal_clip,
+            trim_clip,
+            upload_clip,
+            update_clip_metadata,
+            export_clip_copy,
+            take_screenshot,
+            list_screenshots,
+            reveal_screenshot,
+            set_hotkeys
         ])
         .run(tauri::generate_context!())
         .expect("error while running ClipForge desktop shell");
+}
+
+fn handle_screenshot() -> Result<(), String> {
+    clipforge::screenshot::take_screenshot().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn create_runtime() -> Result<(PathBuf, RecorderService, ClipDatabase), String> {
