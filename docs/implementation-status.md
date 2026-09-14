@@ -40,26 +40,28 @@
 - Screenshot capture is implemented: F9 takes a PNG screenshot via bundled FFmpeg into `~/Pictures/ClipForge`, the recording bar has a Screenshot button, and the Library shows recent screenshots with an Open-in-Explorer action.
 - Storage guardrails are wired: recording refuses to start below 2 GB free and a backend worker stops an active recording and flags `StorageLow` when available disk drops to critical; the recording bar shows free disk space and a low-disk warning.
 - Panic reporting writes crash reports with stack traces to the logs folder (`library/logs`), prunes old entries, and the Settings screen can open the logs folder.
+- Native Windows Graphics Capture now downscales the captured window/monitor to the configured resolution cap (e.g. 720p) with even dimensions while preserving aspect ratio; covered by unit tests.
+- Capture quality and storage settings are exposed: the Settings screen can change resolution, FPS, bitrate, buffer storage cap, excluded window titles, and the separate-audio-tracks toggle via the `set_capture_settings` command, and current values are shown in DesktopStatus.
+- The configured storage cap is enforced by a backend worker that prunes the oldest rolling buffer segments once the buffer exceeds `storage_limit_gb`.
+- SQLite schema uses versioned migrations tracked via `PRAGMA user_version`; legacy databases (missing tables or the `title` column) are repaired and upgraded in place, with migration tests.
 - Vite TypeScript UI builds and has interactive Library, Recording, Auto Clip, Uploads, and Settings views.
 - Library search, event/upload filters, and grid/list switching are functional in the UI.
 - User-visible notices are shown for major actions and failures instead of relying only on console output.
 
 ## Not Fully Working Yet
 
-- Native Windows Graphics Capture is wired for rolling replay capture with native audio; resolution downscaling still needs more work.
-- Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work.
-- Capture has not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
+- Native Windows Graphics Capture and FFmpeg capture finalization have not yet been manually QA-tested on real NVIDIA/AMD/Intel gaming systems.
+- Native WASAPI audio is mixed into a single AAC track for MVP clips; separate audio tracks and per-process audio capture are still future work (the separate-audio-tracks setting is stored but not yet honored by the encoder).
 - Valve GSI receiver is a lightweight MVP receiver; config templates can be generated from the Auto Clip screen, but richer event mapping per game is still needed.
 - Auto start/stop is conservative but live: when auto-record is enabled, supported detected games can start recording and stop when the game disappears.
-- Hotkeys are still hardcoded; editable hotkey registration is future work.
-- Capture source, quality, storage cap, excluded windows, and per-game override UI are still incomplete.
+- Per-game capture quality overrides are still incomplete.
 - Recorder service still runs inside the Tauri process instead of a separate background service process.
 - Installer onboarding and auto-update are still not implemented.
 
 ## Next Engineering Steps
 
-1. Extend native Windows Graphics Capture with resolution downscaling and richer capture-source selection.
-2. Add separate audio tracks and optional per-process loopback capture.
-3. Expand CS2/Dota GSI event mapping beyond the current MVP event parser.
+1. Honor the separate-audio-tracks setting by encoding system and mic audio to distinct tracks, and consider per-process loopback capture.
+2. Expand CS2/Dota GSI event mapping beyond the current MVP event parser.
+3. Add per-game capture quality overrides.
 4. Add installer/onboarding screens for privacy, capture source, storage, and hotkeys.
 5. Run manual QA on Windows gaming hardware and tune CPU/GPU overhead.

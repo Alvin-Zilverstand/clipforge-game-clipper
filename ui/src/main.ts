@@ -75,6 +75,12 @@ type DesktopStatus = {
   hotkey_toggle_session_recording: string;
   hotkey_screenshot: string;
   free_disk_gb: number;
+  capture_fps: number;
+  capture_bitrate_kbps: number;
+  capture_resolution: string;
+  storage_limit_gb: number;
+  excluded_window_titles: string[];
+  separate_audio_tracks: boolean;
 };
 
 type ClipDto = {
@@ -152,6 +158,13 @@ type AppState = {
   hotkeyToggleRecording: string;
   hotkeyScreenshot: string;
   freeDiskGb: number;
+  captureFps: number;
+  captureBitrateKbps: number;
+  captureResolution: string;
+  storageLimitGb: number;
+  excludedWindowTitles: string[];
+  excludedWindowText: string;
+  separateAudioTracks: boolean;
 };
 
 type TauriGlobal = {
@@ -228,6 +241,13 @@ const state: AppState = {
   hotkeyToggleRecording: "Alt+F7",
   hotkeyScreenshot: "F9",
   freeDiskGb: 0,
+  captureFps: 30,
+  captureBitrateKbps: 6000,
+  captureResolution: "1280x720",
+  storageLimitGb: 50,
+  excludedWindowTitles: [],
+  excludedWindowText: "",
+  separateAudioTracks: false,
 };
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -627,6 +647,14 @@ function renderUploadHistoryRow(entry: UploadHistoryEntry) {
 }
 
 function renderSettingsView() {
+  const resolutionPresets = ["1280x720", "1920x1080", "2560x1440", "3840x2160"];
+  const resolutionOptions = resolutionPresets.includes(state.captureResolution)
+    ? resolutionPresets
+    : [state.captureResolution, ...resolutionPresets];
+  const fpsPresets = [30, 60, 120, 144];
+  const fpsOptions = fpsPresets.includes(state.captureFps)
+    ? fpsPresets
+    : [state.captureFps, ...fpsPresets];
   return `
     <section class="settings-grid">
       <article class="settings-panel">
@@ -636,9 +664,33 @@ function renderSettingsView() {
         <label class="toggle"><input type="checkbox" ${state.autoUpload ? "checked" : ""} data-action="toggle-auto-upload" /> Auto-upload after clipping</label>
       </article>
       <article class="settings-panel">
+        <p class="eyebrow">Capture</p>
+        <h2>Quality & rights</h2>
+        <p class="muted">Current: ${escapeHtml(state.captureResolution)} @ ${state.captureFps} fps (${state.captureBitrateKbps.toLocaleString()} kbps). New settings apply the next time capture starts.</p>
+        <div class="field-row">
+          <label>Resolution
+            <select data-action="capture-resolution">
+              ${resolutionOptions.map((option) => `<option value="${option}" ${option === state.captureResolution ? "selected" : ""}>${option}</option>`).join("")}
+            </select>
+          </label>
+          <label>FPS
+            <select data-action="capture-fps">
+              ${fpsOptions.map((option) => `<option value="${option}" ${option === state.captureFps ? "selected" : ""}>${option} fps</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <label>Video bitrate (kbps) <input type="number" min="500" max="50000" step="500" value="${state.captureBitrateKbps}" data-action="capture-bitrate" /></label>
+        <label>Buffer storage cap (GB) <input type="number" min="5" max="5000" step="1" value="${state.storageLimitGb}" data-action="capture-storage-gb" /></label>
+        <label>Excluded window titles
+          <textarea rows="2" placeholder="comma separated, e.g. Brave, Discord - Settings" data-action="excluded-windows">${escapeHtml(state.excludedWindowText)}</textarea>
+        </label>
+        <label class="toggle"><input type="checkbox" ${state.separateAudioTracks ? "checked" : ""} data-action="toggle-separate-audio" /> Record separate audio tracks for game and mic</label>
+        <button data-action="save-capture-settings">Save Capture Settings</button>
+      </article>
+      <article class="settings-panel">
         <p class="eyebrow">Storage</p>
-        <h2>50 GB cap</h2>
-        <p class="muted">Old temporary buffer segments are removed automatically; saved clips are kept.</p>
+        <h2>${state.storageLimitGb} GB buffer cap</h2>
+        <p class="muted">Old temporary buffer segments are removed automatically once the buffer reaches the cap; saved clips are kept.</p>
       </article>
       <article class="settings-panel">
         <p class="eyebrow">Support</p>
@@ -834,6 +886,34 @@ function bindEvents() {
   });
   appRoot.querySelector<HTMLButtonElement>("[data-action='save-hotkeys']")?.addEventListener("click", () => {
     void saveHotkeys();
+  });
+
+  appRoot.querySelector<HTMLSelectElement>("[data-action='capture-resolution']")?.addEventListener("change", (event) => {
+    state.captureResolution = (event.target as HTMLSelectElement).value;
+  });
+
+  appRoot.querySelector<HTMLSelectElement>("[data-action='capture-fps']")?.addEventListener("change", (event) => {
+    state.captureFps = Number((event.target as HTMLSelectElement).value);
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='capture-bitrate']")?.addEventListener("input", (event) => {
+    state.captureBitrateKbps = Number((event.target as HTMLInputElement).value);
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='capture-storage-gb']")?.addEventListener("input", (event) => {
+    state.storageLimitGb = Number((event.target as HTMLInputElement).value);
+  });
+
+  appRoot.querySelector<HTMLTextAreaElement>("[data-action='excluded-windows']")?.addEventListener("input", (event) => {
+    state.excludedWindowText = (event.target as HTMLTextAreaElement).value;
+  });
+
+  appRoot.querySelector<HTMLInputElement>("[data-action='toggle-separate-audio']")?.addEventListener("change", (event) => {
+    state.separateAudioTracks = (event.target as HTMLInputElement).checked;
+  });
+
+  appRoot.querySelector<HTMLButtonElement>("[data-action='save-capture-settings']")?.addEventListener("click", () => {
+    void saveCaptureSettings();
   });
 
   appRoot.querySelector<HTMLButtonElement>("[data-action='reveal-crash-logs']")?.addEventListener("click", () => {
@@ -1118,6 +1198,13 @@ function applyDesktopStatus(status: DesktopStatus) {
   state.hotkeyToggleRecording = status.hotkey_toggle_session_recording;
   state.hotkeyScreenshot = status.hotkey_screenshot;
   state.freeDiskGb = status.free_disk_gb;
+  state.captureFps = status.capture_fps;
+  state.captureBitrateKbps = status.capture_bitrate_kbps;
+  state.captureResolution = status.capture_resolution;
+  state.storageLimitGb = status.storage_limit_gb;
+  state.excludedWindowTitles = status.excluded_window_titles ?? [];
+  state.excludedWindowText = (status.excluded_window_titles ?? []).join(", ");
+  state.separateAudioTracks = status.separate_audio_tracks ?? false;
 }
 
 async function trimSelectedClip() {
@@ -1477,6 +1564,44 @@ async function saveHotkeys() {
     console.warn("Could not save hotkeys", error);
     showNotice(`Could not save hotkeys: ${String(error)}`);
   }
+}
+
+async function saveCaptureSettings() {
+  if (!tauriInvoke) {
+    return;
+  }
+
+  const [width, height] = parseResolution(state.captureResolution);
+  const excludedWindowTitles = state.excludedWindowText
+    .split(",")
+    .map((title) => title.trim())
+    .filter((title) => title.length > 0);
+
+  try {
+    const status = await tauriInvoke<DesktopStatus>("set_capture_settings", {
+      width,
+      height,
+      fps: state.captureFps,
+      bitrateKbps: state.captureBitrateKbps,
+      storageLimitGb: state.storageLimitGb,
+      excludedWindowTitles,
+      separateAudioTracks: state.separateAudioTracks,
+    });
+    applyDesktopStatus(status);
+    showNotice("Capture settings saved. They will apply the next time capture starts.");
+    render();
+  } catch (error) {
+    console.warn("Could not save capture settings", error);
+    showNotice(`Could not save capture settings: ${String(error)}`);
+  }
+}
+
+function parseResolution(value: string): [number, number] {
+  const [width, height] = value.split("x").map((part) => Number(part));
+  return [
+    Number.isFinite(width) ? width : 1280,
+    Number.isFinite(height) ? height : 720,
+  ];
 }
 
 async function takeScreenshot() {

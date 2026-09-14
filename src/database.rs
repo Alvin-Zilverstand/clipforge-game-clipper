@@ -3,6 +3,44 @@ use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const CURRENT_SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
+
+const MIGRATIONS: &[&str] = &[
+    // v1: initial clips table (also used to repair databases predating versioned migrations).
+    "
+    CREATE TABLE IF NOT EXISTS clips (
+        id TEXT PRIMARY KEY NOT NULL,
+        title TEXT,
+        session_id TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        thumbnail_path TEXT,
+        created_at_ms INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        event_type TEXT,
+        tags_json TEXT NOT NULL,
+        upload_url TEXT,
+        upload_provider TEXT
+    );
+    CREATE INDEX IF NOT EXISTS clips_created_at_idx ON clips(created_at_ms DESC);
+    CREATE INDEX IF NOT EXISTS clips_game_id_idx ON clips(game_id);
+    ",
+    // v2: upload history bookkeeping.
+    "
+    CREATE TABLE IF NOT EXISTS upload_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        clip_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL,
+        url TEXT,
+        error TEXT,
+        attempted_at_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS upload_history_clip_id_idx ON upload_history(clip_id);
+    ",
+];
+
 #[derive(Debug)]
 pub struct ClipDatabase {
     connection: Connection,
@@ -22,42 +60,32 @@ impl ClipDatabase {
     }
 
     pub fn init(&self) -> rusqlite::Result<()> {
-        self.connection.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS clips (
-                id TEXT PRIMARY KEY NOT NULL,
-                title TEXT,
-                session_id TEXT NOT NULL,
-                game_id TEXT NOT NULL,
-                path TEXT NOT NULL,
-                thumbnail_path TEXT,
-                created_at_ms INTEGER NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                source TEXT NOT NULL,
-                event_type TEXT,
-                tags_json TEXT NOT NULL,
-                upload_url TEXT,
-                upload_provider TEXT
-            );
-            CREATE INDEX IF NOT EXISTS clips_created_at_idx ON clips(created_at_ms DESC);
-            CREATE INDEX IF NOT EXISTS clips_game_id_idx ON clips(game_id);
-            CREATE TABLE IF NOT EXISTS upload_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                clip_id TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                status TEXT NOT NULL,
-                url TEXT,
-                error TEXT,
-                attempted_at_ms INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS upload_history_clip_id_idx ON upload_history(clip_id);
-            ",
-        )?;
+        self.migrate()?;
         if !self.column_exists("clips", "title")? {
             self.connection
                 .execute("ALTER TABLE clips ADD COLUMN title TEXT", [])?;
         }
-        self.connection.pragma_update(None, "user_version", 2)
+        if self.user_version()? != CURRENT_SCHEMA_VERSION {
+            self.connection
+                .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
+        }
+        Ok(())
+    }
+
+    fn migrate(&self) -> rusqlite::Result<()> {
+        let mut version = self.user_version()?;
+        while (version as usize) < MIGRATIONS.len() {
+            self.connection.execute_batch(MIGRATIONS[version as usize])?;
+            version += 1;
+            self.connection
+                .pragma_update(None, "user_version", version)?;
+        }
+        Ok(())
+    }
+
+    fn user_version(&self) -> rusqlite::Result<u32> {
+        self.connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
     }
 
     pub fn load_clips(&self) -> rusqlite::Result<Vec<Clip>> {
@@ -281,12 +309,89 @@ fn millis_to_system_time(millis: i64) -> SystemTime {
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trips_clip_records() {
-        let db_path = std::env::temp_dir().join(format!(
-            "clipforge-db-{}.sqlite",
+    fn temp_database_path(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "clipforge-db-{name}-{}.sqlite",
             system_time_to_millis(SystemTime::now())
         ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn fresh_database_walks_to_current_version() {
+        let db_path = temp_database_path("fresh");
+        let database = ClipDatabase::open(&db_path).expect("database");
+        assert_eq!(database.user_version().expect("version"), CURRENT_SCHEMA_VERSION);
+        database.connection.execute("SELECT 1 FROM upload_history", []).expect("v2 table exists");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn opening_is_idempotent_and_does_not_downgrade() {
+        let db_path = temp_database_path("idempotent");
+        let first = ClipDatabase::open(&db_path).expect("database");
+        let second = ClipDatabase::open(&db_path).expect("database re-open");
+        assert_eq!(
+            first.user_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            second.user_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn legacy_database_is_repaired_and_upgraded() {
+        let db_path = temp_database_path("legacy");
+        {
+            let connection = Connection::open(&db_path).expect("raw connection");
+            connection
+                .execute_batch(
+                    "
+                    CREATE TABLE clips (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        session_id TEXT NOT NULL,
+                        game_id TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        thumbnail_path TEXT,
+                        created_at_ms INTEGER NOT NULL,
+                        duration_ms INTEGER NOT NULL,
+                        source TEXT NOT NULL,
+                        event_type TEXT,
+                        tags_json TEXT NOT NULL,
+                        upload_url TEXT,
+                        upload_provider TEXT
+                    );
+                    ",
+                )
+                .expect("legacy clips table");
+            connection
+                .pragma_update(None, "user_version", 0)
+                .expect("version 0");
+        }
+        let database = ClipDatabase::open(&db_path).expect("open with repair");
+        assert_eq!(database.user_version().expect("version"), CURRENT_SCHEMA_VERSION);
+        assert!(database.column_exists("clips", "title").expect("column lookup"));
+        assert!(database.column_exists("clips", "id").expect("column lookup"));
+        database
+            .insert_upload_history(
+                "clip-old",
+                "catbox",
+                "uploaded",
+                Some("https://example.test/old.mp4"),
+                None,
+                SystemTime::now(),
+            )
+            .expect("v2 table usable");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn round_trips_clip_records() {
+        let db_path = temp_database_path("roundtrip");
         let database = ClipDatabase::open(&db_path).expect("database");
         let clip = Clip {
             id: "clip-1".to_string(),

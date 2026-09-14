@@ -122,6 +122,12 @@ struct DesktopStatus {
     hotkey_toggle_session_recording: String,
     hotkey_screenshot: String,
     free_disk_gb: f64,
+    capture_fps: u32,
+    capture_bitrate_kbps: u32,
+    capture_resolution: String,
+    storage_limit_gb: u64,
+    excluded_window_titles: Vec<String>,
+    separate_audio_tracks: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +386,37 @@ fn set_auto_clip_event_enabled(
     save_settings(&runtime.library_root, &recorder.settings)
         .map_err(|error| format!("Could not save auto-clip setting: {error}"))?;
     Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+#[tauri::command]
+fn set_capture_settings(
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_kbps: u32,
+    storage_limit_gb: u64,
+    excluded_window_titles: Vec<String>,
+    separate_audio_tracks: bool,
+    runtime: State<'_, AppRuntime>,
+) -> Result<DesktopStatus, String> {
+    let mut recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+    let capture = runtime.capture.lock().map_err(|error| error.to_string())?;
+    recorder.settings.quality.width = even_between(width, 640, 7680);
+    recorder.settings.quality.height = even_between(height, 360, 4320);
+    recorder.settings.quality.fps = fps.clamp(15, 240);
+    recorder.settings.quality.bitrate_kbps = bitrate_kbps.clamp(500, 50_000);
+    recorder.settings.storage_limit_gb = storage_limit_gb.clamp(5, 5000);
+    recorder.settings.privacy.excluded_window_titles =
+        excluded_window_titles.iter().map(|title| title.trim().to_string()).filter(|title| !title.is_empty()).collect();
+    recorder.settings.privacy.separate_audio_tracks = separate_audio_tracks;
+    save_settings(&runtime.library_root, &recorder.settings)
+        .map_err(|error| format!("Could not save capture settings: {error}"))?;
+    Ok(status_from_recorder(&recorder, capture.as_ref()))
+}
+
+fn even_between(value: u32, min: u32, max: u32) -> u32 {
+    let value = value.clamp(min, max);
+    value - (value % 2)
 }
 
 #[tauri::command]
@@ -1455,6 +1492,7 @@ fn main() {
             set_auto_record_enabled,
             set_upload_settings,
             set_auto_clip_event_enabled,
+            set_capture_settings,
             write_gsi_configs,
             poll_auto_clip_events,
             save_manual_clip,
@@ -1620,6 +1658,7 @@ fn start_backend_workers(app: tauri::AppHandle) {
             let _ = refresh_detected_game_inner(runtime.inner());
             let _ = poll_auto_clip_events_inner(runtime.inner());
             let _ = stop_capture_on_critical_storage(runtime.inner());
+            let _ = enforce_storage_cap(runtime.inner());
             thread::sleep(Duration::from_secs(2));
         })
         .expect("could not start ClipForge backend workers");
@@ -1646,6 +1685,28 @@ fn stop_capture_on_critical_storage(runtime: &AppRuntime) -> Result<(), String> 
         eprintln!(
             "ClipForge stopped recording: critical low disk ({:.1} GB free).",
             storage.free_gb()
+        );
+    }
+    Ok(())
+}
+
+fn enforce_storage_cap(runtime: &AppRuntime) -> Result<(), String> {
+    let (buffer_root, limit_gb) = {
+        let recorder = runtime.recorder.lock().map_err(|error| error.to_string())?;
+        (recorder.paths.buffer_root.clone(), recorder.settings.storage_limit_gb)
+    };
+    if limit_gb == 0 {
+        return Ok(());
+    }
+    let max_bytes = limit_gb.saturating_mul(1024 * 1024 * 1024);
+    let report =
+        clipforge::storage::cleanup_oldest_files_until_under_limit(&buffer_root, max_bytes)
+            .map_err(|error| format!("Could not enforce storage cap: {error}"))?;
+    if report.deleted_files > 0 {
+        eprintln!(
+            "ClipForge storage cap: removed {} file(s) ({} MB) from the buffer.",
+            report.deleted_files,
+            report.deleted_bytes / (1024 * 1024)
         );
     }
     Ok(())
@@ -1694,6 +1755,15 @@ fn status_from_recorder(recorder: &RecorderService, capture: Option<&ActiveCaptu
         hotkey_toggle_session_recording: recorder.settings.hotkeys.toggle_session_recording.clone(),
         hotkey_screenshot: recorder.settings.hotkeys.screenshot.clone(),
         free_disk_gb: clipforge::storage::check_storage_space(&recorder.paths.buffer_root).free_gb(),
+        capture_fps: recorder.settings.quality.fps,
+        capture_bitrate_kbps: recorder.settings.quality.bitrate_kbps,
+        capture_resolution: format!(
+            "{}x{}",
+            recorder.settings.quality.width, recorder.settings.quality.height
+        ),
+        storage_limit_gb: recorder.settings.storage_limit_gb,
+        excluded_window_titles: recorder.settings.privacy.excluded_window_titles.clone(),
+        separate_audio_tracks: recorder.settings.privacy.separate_audio_tracks,
     }
 }
 

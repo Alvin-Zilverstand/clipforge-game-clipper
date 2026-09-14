@@ -432,6 +432,19 @@ textarea {
   color: #f5f7fb;
 }
 
+.field-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.field-row label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .toggle {
   display: flex;
   align-items: center;

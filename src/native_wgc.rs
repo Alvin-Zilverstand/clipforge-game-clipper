@@ -1,6 +1,33 @@
 use crate::capture::{CaptureBackend, CaptureConfig, CaptureError};
 use std::path::PathBuf;
 
+pub(crate) fn downscale_to_cap(
+    width: u32,
+    height: u32,
+    cap_width: u32,
+    cap_height: u32,
+) -> (u32, u32) {
+    if width == 0 || height == 0 || cap_width == 0 || cap_height == 0 {
+        return (even_capped_dimension(width, cap_width), even_capped_dimension(height, cap_height));
+    }
+    let scale = (cap_width as f32 / width as f32).min(cap_height as f32 / height as f32);
+    if scale >= 1.0 {
+        return (
+            even_capped_dimension(width, cap_width),
+            even_capped_dimension(height, cap_height),
+        );
+    }
+    (
+        even_capped_dimension((width as f32 * scale).round() as u32, cap_width),
+        even_capped_dimension((height as f32 * scale).round() as u32, cap_height),
+    )
+}
+
+fn even_capped_dimension(value: u32, cap: u32) -> u32 {
+    let value = value.min(cap).max(2);
+    value - (value % 2)
+}
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use super::*;
@@ -488,10 +515,6 @@ mod windows_impl {
         }
     }
 
-    fn even_dimension(value: u32) -> u32 {
-        value.saturating_sub(value % 2).max(2)
-    }
-
     fn find_window_for_source(
         source: &crate::capture::CaptureSource,
     ) -> Result<Option<Window>, HandlerError> {
@@ -526,25 +549,24 @@ mod windows_impl {
         Ok(None)
     }
 
-    fn window_size(window: Window, fallback_width: u32, fallback_height: u32) -> (u32, u32) {
+    fn window_size(window: Window, cap_width: u32, cap_height: u32) -> (u32, u32) {
         let width = window
             .width()
             .ok()
             .and_then(|value| u32::try_from(value.max(0)).ok())
-            .unwrap_or(fallback_width);
+            .unwrap_or(cap_width);
         let height = window
             .height()
             .ok()
             .and_then(|value| u32::try_from(value.max(0)).ok())
-            .unwrap_or(fallback_height);
-        (even_dimension(width), even_dimension(height))
+            .unwrap_or(cap_height);
+        downscale_to_cap(width, height, cap_width, cap_height)
     }
 
-    fn monitor_size(monitor: Monitor, fallback_width: u32, fallback_height: u32) -> (u32, u32) {
-        (
-            even_dimension(monitor.width().unwrap_or(fallback_width)),
-            even_dimension(monitor.height().unwrap_or(fallback_height)),
-        )
+    fn monitor_size(monitor: Monitor, cap_width: u32, cap_height: u32) -> (u32, u32) {
+        let width = monitor.width().unwrap_or(cap_width);
+        let height = monitor.height().unwrap_or(cap_height);
+        downscale_to_cap(width, height, cap_width, cap_height)
     }
 
     fn recording_settings<T: TryInto<GraphicsCaptureItemType> + Send + 'static>(
@@ -666,6 +688,34 @@ impl CaptureBackend for NativeWgcReplayCaptureBackend {
 
     fn stop(&mut self) -> Result<(), CaptureError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod downscale_tests {
+    use super::downscale_to_cap;
+
+    #[test]
+    fn keeps_resolution_at_or_below_the_cap() {
+        assert_eq!(downscale_to_cap(2560, 1440, 1280, 720), (1280, 720));
+        assert_eq!(downscale_to_cap(1920, 1080, 1280, 720), (1280, 720));
+        assert_eq!(downscale_to_cap(3840, 2160, 1920, 1080), (1920, 1080));
+    }
+
+    #[test]
+    fn leaves_smaller_sources_unchanged() {
+        assert_eq!(downscale_to_cap(800, 600, 1280, 720), (800, 600));
+        assert_eq!(downscale_to_cap(1280, 720, 1280, 720), (1280, 720));
+    }
+
+    #[test]
+    fn preserves_aspect_ratio_and_even_dimensions_when_downscaling() {
+        let (width, height) = downscale_to_cap(2000, 1000, 1000, 600);
+        assert_eq!(width % 2, 0);
+        assert_eq!(height % 2, 0);
+        assert!(width <= 1000);
+        assert!(height <= 600);
+        assert_eq!(width as f32 / height as f32, 2000.0 / 1000.0);
     }
 }
 
