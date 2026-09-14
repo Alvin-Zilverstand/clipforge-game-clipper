@@ -170,6 +170,8 @@ impl GameIntegration for ValveGsiIntegration {
             GameEventType::RoundWin
         } else if lower.contains("match_end") {
             GameEventType::MatchWin
+        } else if lower.contains("match_start") {
+            GameEventType::Bookmark
         } else if lower.contains("bomb") {
             GameEventType::Objective
         } else if lower.contains("mvp") {
@@ -388,6 +390,54 @@ pub fn valve_gsi_raw_events(
                     metadata: [("mvp_count".to_string(), mvps.to_string())].into(),
                 });
             }
+        }
+    }
+
+    // Dota 2 game-state transitions (GSI posts a periodic snapshot; the auto-clip merge
+    // window collapses repeated posts into a single event)
+    if let Some(game_state) = value.pointer("/map/game_state").and_then(Value::as_str) {
+        let game_time = value
+            .pointer("/map/game_time")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        match game_state {
+            "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS" if game_time < 10 => {
+                events.push(RawGameEvent {
+                    event_id: format!("dota_match_start:{}", millis(now)),
+                    name: "match_start".to_string(),
+                    timestamp: now,
+                    player: None,
+                    metadata: [
+                        ("map".to_string(), map_stat_string(&value, "/map/name")),
+                        ("game_time".to_string(), game_time.to_string()),
+                    ]
+                    .into(),
+                });
+            }
+            "DOTA_GAMERULES_STATE_POST_GAME" => {
+                events.push(RawGameEvent {
+                    event_id: format!("dota_match_end:{}", millis(now)),
+                    name: "match_end".to_string(),
+                    timestamp: now,
+                    player: None,
+                    metadata: [
+                        (
+                            "radiant_score".to_string(),
+                            map_stat_string(&value, "/map/radiant_score"),
+                        ),
+                        (
+                            "dire_score".to_string(),
+                            map_stat_string(&value, "/map/dire_score"),
+                        ),
+                        (
+                            "win_team".to_string(),
+                            map_stat_string(&value, "/map/win_team"),
+                        ),
+                    ]
+                    .into(),
+                });
+            }
+            _ => {}
         }
     }
 
@@ -624,5 +674,78 @@ mod tests {
             Some("b")
         );
         assert_eq!(bomb.metadata.get("round").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn parses_dota2_match_end_with_score_metadata() {
+        let body = r#"{
+            "map": {
+                "game_state": "DOTA_GAMERULES_STATE_POST_GAME",
+                "game_time": 2543,
+                "name": "dota",
+                "radiant_score": 28,
+                "dire_score": 14,
+                "win_team": "radiant"
+            }
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        let match_end = events
+            .iter()
+            .find(|event| event.name == "match_end")
+            .expect("match_end event");
+        assert_eq!(
+            match_end.metadata.get("radiant_score").map(String::as_str),
+            Some("28")
+        );
+        assert_eq!(
+            match_end.metadata.get("dire_score").map(String::as_str),
+            Some("14")
+        );
+        assert_eq!(
+            match_end.metadata.get("win_team").map(String::as_str),
+            Some("radiant")
+        );
+    }
+
+    #[test]
+    fn parses_dota2_match_start_on_game_in_progress() {
+        let body = r#"{
+            "map": {
+                "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                "game_time": 4,
+                "name": "dota"
+            }
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        let start = events
+            .iter()
+            .find(|event| event.name == "match_start")
+            .expect("match_start event");
+        assert_eq!(
+            start.metadata.get("map").map(String::as_str),
+            Some("dota")
+        );
+        assert_eq!(
+            start.metadata.get("game_time").map(String::as_str),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn dota2_ignores_match_start_after_initial_snapshot() {
+        let body = r#"{
+            "map": {
+                "game_state": "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS",
+                "game_time": 30
+            }
+        }"#;
+
+        let events = valve_gsi_raw_events(body, SystemTime::UNIX_EPOCH).expect("events");
+
+        assert!(!events.iter().any(|event| event.name == "match_start"));
     }
 }
