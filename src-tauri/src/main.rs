@@ -1,3 +1,6 @@
+// Hide console window on Windows (GUI app)
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use clipforge::audio::{list_ffmpeg_dshow_audio_inputs, AudioDeviceKind};
 use clipforge::capture::{
     ffmpeg_is_available, ffmpeg_supports_filter, ffmpeg_supports_input_device,
